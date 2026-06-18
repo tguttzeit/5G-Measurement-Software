@@ -223,4 +223,10 @@ poetry.toml
 # LSP config files
 pyrightconfig.json
 
-# End of https://www.toptal.com/developers/gitignore/api/c,python
+quectel-CM
+quectel-atc-proxy
+quectel-mbim-proxy
+quectel-qmi-proxy
+
+
+
