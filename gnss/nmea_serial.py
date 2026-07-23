@@ -1,4 +1,4 @@
-from gnss.gnss_reciever import GNSSReceiver, GNSSFix
+from gnss.gnss_receiver import GNSSReceiver, GNSSFix
 
 
 class NMEASerial(GNSSReceiver):

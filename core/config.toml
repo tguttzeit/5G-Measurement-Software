@@ -1,0 +1,15 @@
+[modem]
+type = "quectel"
+port = "/dev/ttyUSB2"
+baud_rate = 115200
+timeout = 1.0
+
+[gnss_receiver]
+type = "nmea_serial"
+port = "/dev/serial0"
+baud_rate = 9600
+
+[collector]
+position_threshold = 15
+max_idle_time = 200
+max_wait_for_fix = 300
