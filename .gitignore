@@ -223,10 +223,10 @@ poetry.toml
 # LSP config files
 pyrightconfig.json
 
-quectel-CM
-quectel-atc-proxy
-quectel-mbim-proxy
-quectel-qmi-proxy
+vendor/quectel/quectel-CM
+vendor/quectel/quectel-atc-proxy
+vendor/quectel/quectel-mbim-proxy
+vendor/quectel/quectel-qmi-proxy
 
 
 
