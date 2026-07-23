@@ -1,10 +1,15 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+
+@dataclass
+class Position:
+    latitude: float
+    longitude: float
+
 @dataclass
 class GNSSFix:
-    lat: float
-    lon: float
+    position: Position
     num_satellites: int
 
 class GNSSReceiver(ABC):

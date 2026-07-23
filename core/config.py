@@ -20,6 +20,10 @@ class CollectorConfig:
     position_threshold: float = 15
     max_idle_time: float = 200
     max_wait_for_fix: float = 300
+    wait_log_interval: float = 5
+    keep_alive_host: str = "8.8.8.8"
+    keep_alive_port: int = 53
+    keep_alive_interval_s: float = 4.0
 
 @dataclass
 class AppConfig:
