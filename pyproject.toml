@@ -2,7 +2,10 @@
 name = "5g-measurement-software"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pyserial>=3.5",
+    "serial>=0.0.97",
+]
 
 [dependency-groups]
 dev = [
