@@ -6,6 +6,7 @@ from pathlib import Path
 from core.collector import Collector
 from core.config import load_config
 from core.logging_setup import setup_logging
+from core.uploader import Uploader
 from gnss import create_gnss_receiver
 from modems import create_modem
 
@@ -25,8 +26,14 @@ def main():
     modem = create_modem(config.modem)
     gnss_receiver = create_gnss_receiver(config.gnss_receiver)
     collector = Collector(modem, gnss_receiver, config.collector)
-    collector.collect()
+    uploader = Uploader(config.uploader)
+
+    uploader.upload_pending_files()
+
+    datapoints = collector.collect()
+    uploader.save_datapoints(datapoints)
+    uploader.upload_pending_files()
 
 
 if __name__ == "__main__":
-    pass
+    main()

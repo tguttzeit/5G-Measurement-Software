@@ -18,3 +18,17 @@ wait_log_interval = 5
 keep_alive_host = "8.8.8.8"
 keep_alive_port = 53
 keep_alive_interval_s = 4.0
+
+[uploader]
+upload_dir = "/home/admin/Logger/upload_queue"
+upload_user = "tim"
+upload_host = "141.82.3.41"
+upload_port = 2000
+remote_dir = "/home/tim/5g-measurement-software/uploads/"
+debug_upload = true
+
+[logging]
+level = "INFO"
+log_file = "5g-measurement.log"
+max_bytes = 5_000_000
+backup_count = 3

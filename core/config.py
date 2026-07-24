@@ -27,6 +27,15 @@ class CollectorConfig:
     keep_alive_interval_s: float = 4.0
 
 @dataclass
+class UploaderConfig:
+    upload_dir: str
+    upload_user: str
+    upload_host: str
+    upload_port: int = 2000
+    remote_dir: str = "/add/your/remote/dir/here"
+    debug_upload: bool = True
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     log_file: str = "/add/your/log/file/here"
@@ -38,6 +47,7 @@ class AppConfig:
     modem: ModemConfig
     gnss_receiver: GnssConfig
     collector: CollectorConfig
+    uploader: UploaderConfig
     logging: LoggingConfig
 
 def load_config(path: Path) -> AppConfig:
@@ -47,5 +57,6 @@ def load_config(path: Path) -> AppConfig:
         modem=ModemConfig(**raw["modem"]),
         gnss_receiver=GnssConfig(**raw["gnss_receiver"]),
         collector=CollectorConfig(**raw.get("collector", {})),
+        uploader=UploaderConfig(**raw["uploader"]),
         logging=LoggingConfig(**raw.get("logging", {}))
     )
