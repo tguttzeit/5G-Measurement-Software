@@ -33,12 +33,12 @@ class Collector:
         self._keep_alive_host = config.keep_alive_host
         self._keep_alive_port = config.keep_alive_port
         self._keep_alive_interval_s = config.keep_alive_interval_s
+        self._last_pos: Position | None = None
 
     def collect(self) -> list[Datapoint]:
         self._modem.open()
         self._gnss_receiver.open()
         time.sleep(1)
-
 
         self._logger.info("Starting data collection...")
 
@@ -50,9 +50,9 @@ class Collector:
                 return []
 
             datapoints: list[Datapoint] = []
-            last_pos: Position | None = None
             idle_start: float | None
             pending_fix: GNSSFix | None = first_fix
+            self._last_pos = None
 
             while True:
                 fix = pending_fix if pending_fix is not None else self._gnss_receiver.read_fix()
@@ -60,16 +60,10 @@ class Collector:
                 if fix is None:
                     continue
 
+                if not self._has_moved_enough(fix):
+                    continue
 
-                if last_pos is not None:
-                    dist = Collector.haversine(last_pos, fix.position)
-                    if dist < self._position_threshold:
-                        self._logger.debug("No relevant movement detected: %.1f m (< %s m (specified threshold))",
-                                          dist, self._position_threshold)
-                        continue
-                    self._logger.info("Enough movement detected: %.1f m", dist)
-                last_pos = fix.position
-                idle_start = None  # Reset Idle-Timer
+                idle_start = None
 
                 if int(fix.num_satellites) < 5:
                     self._logger.warning("Low satellite count (%s) - low measurement precision")
@@ -142,6 +136,23 @@ class Collector:
             fix = self._gnss_receiver.read_fix()
             if fix is not None:
                 return fix
+
+    def _has_moved_enough(self, fix: GNSSFix) -> bool:
+        if self._last_pos is None:
+            self._last_pos = fix.position
+            return True
+
+        dist = Collector.haversine(self._last_pos, fix.position)
+        if dist < self._position_threshold:
+            self._logger.debug(
+                "No relevant movement detected: %.1f m (< %s m (specified threshold))",
+                dist, self._position_threshold,
+            )
+            return False
+
+        self._logger.info("Enough movement detected: %.1f m", dist)
+        self._last_pos = fix.position
+        return True
 
     @staticmethod
     def haversine(old_position: Position, new_position: Position) -> float:
