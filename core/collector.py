@@ -2,6 +2,7 @@ import logging
 import socket
 import time
 from math import radians, sin, cos, asin, sqrt
+from threading import Event, Thread
 
 import pynmea2
 import threading
@@ -38,38 +39,27 @@ class Collector:
         self._gnss_receiver.open()
         time.sleep(1)
 
-        datapoints: list[Datapoint] = []
-        last_pos: Position | None = None
-        idle_start: float | None
-
-        gps_fix = False
-        fix_wait_start = time.time()
-        last_wait_log = 0
 
         self._logger.info("Starting data collection...")
 
         self._start_keep_alive_thread()
 
         try:
+            first_fix = self._wait_for_first_fix()
+            if first_fix is None:
+                return []
+
+            datapoints: list[Datapoint] = []
+            last_pos: Position | None = None
+            idle_start: float | None
+            pending_fix: GNSSFix | None = first_fix
+
             while True:
-                # GPS-Fix Timeout
-                if not gps_fix and (time.time() - fix_wait_start) > self._max_wait_for_first_fix:
-                    self._logger.info("No GPS fix in specified interval of %s s. - Aborting.",
-                                      self._max_wait_for_first_fix)
-                    break
-
-                now = time.time()
-                if not gps_fix and (now - last_wait_log) >= self._wait_log_interval:
-                    self._logger.info("Waiting for first GPS fix… (for %s s by now)",
-                                      int(now - fix_wait_start))
-                    last_wait_log = now
-
-                fix = self._gnss_receiver.read_fix()
+                fix = pending_fix if pending_fix is not None else self._gnss_receiver.read_fix()
+                pending_fix = None
                 if fix is None:
                     continue
 
-                if not gps_fix:
-                    gps_fix = True
 
                 if last_pos is not None:
                     dist = Collector.haversine(last_pos, fix.position)
@@ -95,7 +85,7 @@ class Collector:
                     idle_start = time.time()
 
                 # Messung beenden bei langem Stillstand
-                if gps_fix and idle_start and (time.time() - idle_start) >= self._max_idle_time:
+                if idle_start and (time.time() - idle_start) >= self._max_idle_time:
                     self._logger.info("No movement for %s s. Ending data collection.",
                                       self._max_idle_time)
                     break
@@ -132,6 +122,26 @@ class Collector:
     def _stop_keep_alive_thread(self):
         self._keep_alive_stop_event.set()
         self._keep_alive_thread.join()
+
+    def _wait_for_first_fix(self) -> GNSSFix | None:
+        start = time.time()
+        last_wait_log = 0.0
+
+        while True:
+            elapsed = time.time() - start
+            if elapsed > self._max_wait_for_first_fix:
+                self._logger.info("No GPS fix in specified interval of %s s. - Aborting.",
+                                  self._max_wait_for_first_fix)
+                return None
+
+            now = time.time()
+            if (now - last_wait_log) >= self._wait_log_interval:
+                self._logger.info("Waiting for first GPS fix… (for %s s by now)", int(elapsed))
+                last_wait_log = now
+
+            fix = self._gnss_receiver.read_fix()
+            if fix is not None:
+                return fix
 
     @staticmethod
     def haversine(old_position: Position, new_position: Position) -> float:
