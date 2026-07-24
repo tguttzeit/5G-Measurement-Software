@@ -26,14 +26,18 @@ class Collector:
         self._logger = logging.getLogger(__name__)
         self._modem = modem
         self._gnss_receiver = gnss_receiver
+
         self._position_threshold = config.position_threshold
         self._max_idle_time = config.max_idle_time
         self._max_wait_for_first_fix = config.max_wait_for_first_fix
         self._wait_log_interval = config.wait_log_interval
+
         self._keep_alive_host = config.keep_alive_host
         self._keep_alive_port = config.keep_alive_port
         self._keep_alive_interval_s = config.keep_alive_interval_s
+
         self._last_pos: Position | None = None
+        self._last_movement_time: float | None = None
 
     def collect(self) -> list[Datapoint]:
         self._modem.open()
@@ -63,25 +67,12 @@ class Collector:
                 if not self._has_moved_enough(fix):
                     continue
 
-                idle_start = None
-
                 if int(fix.num_satellites) < 5:
                     self._logger.warning("Low satellite count (%s) - low measurement precision")
 
-                timestamp = f"{datetime.now(UTC).isoformat()}Z"
-                for modem_data in self._modem.query_cell_info():
-                    datapoint = Datapoint(timestamp=timestamp, fix=fix, cell_sample=modem_data)
-                    datapoints.append(datapoint)
-                    self._logger.debug("Datapoint captured: %s", datapoint)
+                datapoints.extend(self._capture_datapoints(fix))
 
-                # Idle-Timer setzen
-                if idle_start is None:
-                    idle_start = time.time()
-
-                # Messung beenden bei langem Stillstand
-                if idle_start and (time.time() - idle_start) >= self._max_idle_time:
-                    self._logger.info("No movement for %s s. Ending data collection.",
-                                      self._max_idle_time)
+                if self._has_been_idle_too_long():
                     break
         finally:
             self._stop_keep_alive_thread()
@@ -152,6 +143,7 @@ class Collector:
 
         self._logger.info("Enough movement detected: %.1f m", dist)
         self._last_pos = fix.position
+        self._last_movement_time = None
         return True
 
     @staticmethod
@@ -162,3 +154,23 @@ class Collector:
         a = sin(d_latitude / 2) ** 2
         b = cos(radians(old_position.latitude)) * cos(radians(new_position.latitude)) * sin(d_longitude / 2) ** 2
         return 2 * r * asin(sqrt(a+b))
+
+    def _capture_datapoints(self, fix: GNSSFix) -> list[Datapoint]:
+        timestamp = f"{datetime.now(UTC).isoformat()}Z"
+        datapoints: list[Datapoint] = []
+        for modem_data in self._modem.query_cell_info():
+            datapoint = Datapoint(timestamp=timestamp, fix=fix, cell_sample=modem_data)
+            datapoints.append(datapoint)
+            self._logger.debug("Datapoint captured: %s", datapoint)
+        return datapoints
+
+    def _has_been_idle_too_long(self) -> bool:
+        if self._last_movement_time is None:
+            self._last_movement_time = time.time()
+            return False
+
+        idle_duration = time.time() - self._last_movement_time
+        if idle_duration >= self._max_idle_time:
+            self._logger.info("No movement for %s s. Ending data collection.", self._max_idle_time)
+            return True
+        return False
