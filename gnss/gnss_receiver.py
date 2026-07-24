@@ -6,6 +6,7 @@ from dataclasses import dataclass
 class Position:
     latitude: float
     longitude: float
+    altitude: float | None = None
 
 @dataclass
 class GNSSFix:

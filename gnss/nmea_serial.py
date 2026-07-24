@@ -31,7 +31,7 @@ class NMEASerial(GNSSReceiver):
         msg = pynmea2.parse(line)
         if msg.gps_qual == 0:
             return None
-        position = Position(latitude=msg.latitude, longitude=msg.longitude)
+        position = Position(latitude=msg.latitude, longitude=msg.longitude, altitude=msg.altitude)
         return GNSSFix(position=position, num_satellites=int(msg.num_sats))
 
     @property
