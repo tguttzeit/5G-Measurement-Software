@@ -26,10 +26,18 @@ class CollectorConfig:
     keep_alive_interval_s: float = 4.0
 
 @dataclass
+class LoggingConfig:
+    level: str = "INFO"
+    log_file: str = "file.log" # TODO: find something good here
+    max_bytes: int = 5_000_000
+    backup_count: int = 3
+
+@dataclass
 class AppConfig:
     modem: ModemConfig
     gnss_receiver: GnssConfig
     collector: CollectorConfig
+    logging: LoggingConfig
 
 def load_config(path: Path) -> AppConfig:
     with open(path, "rb") as f:
@@ -38,4 +46,5 @@ def load_config(path: Path) -> AppConfig:
         modem=ModemConfig(**raw["modem"]),
         gnss_receiver=GnssConfig(**raw["gnss_receiver"]),
         collector=CollectorConfig(**raw.get("collector", {})),
+        logging=LoggingConfig(**raw.get("logging", {}))
     )

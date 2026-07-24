@@ -1,3 +1,5 @@
+import logging
+
 import pynmea2
 import serial
 
@@ -6,6 +8,7 @@ from gnss.gnss_receiver import GNSSReceiver, GNSSFix, Position
 
 class NMEASerial(GNSSReceiver):
     def __init__(self, port: str, baud_rate: int = 9600, timeout: float = 1.0):
+        self._logger = logging.getLogger(__name__)
         self._port = port
         self._baud_rate = baud_rate
         self._timeout = timeout

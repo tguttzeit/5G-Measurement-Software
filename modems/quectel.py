@@ -1,3 +1,4 @@
+import logging
 import time
 import serial
 
@@ -6,6 +7,7 @@ from modems.modem import Modem, CellSample
 
 class Quectel(Modem):
     def __init__(self, port: str, baud_rate: int = 115200, timeout: float = 1.0):
+        self._logger = logging.getLogger(__name__)
         self._port = port
         self._baud_rate = baud_rate
         self._timeout = timeout

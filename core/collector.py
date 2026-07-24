@@ -1,3 +1,4 @@
+import logging
 import socket
 import time
 from math import radians, sin, cos, asin, sqrt
@@ -21,6 +22,7 @@ class Datapoint:
 
 class Collector:
     def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig):
+        self._logger = logging.getLogger(__name__)
         self._modem = modem
         self._gnss_receiver = gnss_receiver
         self._position_threshold = config.position_threshold
