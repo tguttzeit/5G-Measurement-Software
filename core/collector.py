@@ -67,9 +67,6 @@ class Collector:
                 if not self._has_moved_enough(fix):
                     continue
 
-                if int(fix.num_satellites) < 5:
-                    self._logger.warning("Low satellite count (%s) - low measurement precision")
-
                 datapoints.extend(self._capture_datapoints(fix))
 
                 if self._has_been_idle_too_long():

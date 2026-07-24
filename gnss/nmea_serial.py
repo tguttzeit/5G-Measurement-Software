@@ -29,8 +29,13 @@ class NMEASerial(GNSSReceiver):
         if not line.startswith(("$GNGGA", "$GPGGA")):
             return None
         msg = pynmea2.parse(line)
+
         if msg.gps_qual == 0:
             return None
+
+        if int(msg.num_sats) < 5:
+            self._logger.warning("Low satellite count (%s) - low measurement precision", msg.num_sats)
+
         position = Position(latitude=msg.latitude, longitude=msg.longitude, altitude=msg.altitude)
         return GNSSFix(position=position, num_satellites=int(msg.num_sats))
 
