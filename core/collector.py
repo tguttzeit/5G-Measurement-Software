@@ -48,10 +48,7 @@ class Collector:
 
         self._logger.info("Starting data collection...")
 
-        # Keep-Alive-Thread starten
-        keep_alive_stop_event = threading.Event()
-        keep_alive_thread = threading.Thread(target=self.keep_link_alive, args=(keep_alive_stop_event,), daemon=True)
-        keep_alive_thread.start()
+        self._start_keep_alive_thread()
 
         try:
             while True:
@@ -103,13 +100,18 @@ class Collector:
                                       self._max_idle_time)
                     break
         finally:
-            keep_alive_stop_event.set()
-            keep_alive_thread.join()
+            self._stop_keep_alive_thread()
             self._gnss_receiver.close()
             self._modem.close()
             self._logger.info("Finished data collection")
 
         return datapoints
+
+    def _start_keep_alive_thread(self,) -> None:
+        self._keep_alive_stop_event = threading.Event()
+        self._keep_alive_thread = threading.Thread(target=self.keep_link_alive, args=(self._keep_alive_stop_event,),
+                                                   daemon=True)
+        self._keep_alive_thread.start()
 
     def keep_link_alive(self, stop_event: threading.Event):
         """Kleines UDP-Paket alle KEEPALIVE_INTERVAL Sekunden senden."""
@@ -126,6 +128,10 @@ class Collector:
                         pass  # Netzwerk gerade nicht verfügbar
                     next_timestamp = now + self._keep_alive_interval_s
                 time.sleep(0.2)
+
+    def _stop_keep_alive_thread(self):
+        self._keep_alive_stop_event.set()
+        self._keep_alive_thread.join()
 
     @staticmethod
     def haversine(old_position: Position, new_position: Position) -> float:
