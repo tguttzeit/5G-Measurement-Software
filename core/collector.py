@@ -1,13 +1,10 @@
 import logging
 import socket
-import time
-from math import radians, sin, cos, asin, sqrt
-from threading import Event, Thread
-
-import pynmea2
 import threading
-from datetime import datetime, UTC
+import time
 from dataclasses import dataclass
+from datetime import datetime, UTC
+from math import radians, sin, cos, asin, sqrt
 
 from core.config import CollectorConfig
 from gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
@@ -54,16 +51,10 @@ class Collector:
                 return []
 
             datapoints: list[Datapoint] = []
-            idle_start: float | None
-            pending_fix: GNSSFix | None = first_fix
             self._last_pos = None
+            self._last_movement_time = None
 
-            while True:
-                fix = pending_fix if pending_fix is not None else self._gnss_receiver.read_fix()
-                pending_fix = None
-                if fix is None:
-                    continue
-
+            for fix in self._iter_fixes(first_fix):
                 if not self._has_moved_enough(fix):
                     continue
 
@@ -79,7 +70,7 @@ class Collector:
 
         return datapoints
 
-    def _start_keep_alive_thread(self,) -> None:
+    def _start_keep_alive_thread(self, ) -> None:
         self._keep_alive_stop_event = threading.Event()
         self._keep_alive_thread = threading.Thread(target=self.keep_link_alive, args=(self._keep_alive_stop_event,),
                                                    daemon=True)
@@ -89,7 +80,7 @@ class Collector:
         """Kleines UDP-Paket alle KEEPALIVE_INTERVAL Sekunden senden."""
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(2)
-            pkt = b"\x00"   # 1-Byte-Payload
+            pkt = b"\x00"  # 1-Byte-Payload
             next_timestamp = time.time()
             while not stop_event.is_set():
                 now = time.time()
@@ -125,6 +116,13 @@ class Collector:
             if fix is not None:
                 return fix
 
+    def _iter_fixes(self, first_fix: GNSSFix):
+        yield first_fix
+        while True:
+            fix = self._gnss_receiver.read_fix()
+            if fix is not None:
+                yield fix
+
     def _has_moved_enough(self, fix: GNSSFix) -> bool:
         if self._last_pos is None:
             self._last_pos = fix.position
@@ -150,7 +148,7 @@ class Collector:
         d_longitude = radians(new_position.longitude - old_position.longitude)
         a = sin(d_latitude / 2) ** 2
         b = cos(radians(old_position.latitude)) * cos(radians(new_position.latitude)) * sin(d_longitude / 2) ** 2
-        return 2 * r * asin(sqrt(a+b))
+        return 2 * r * asin(sqrt(a + b))
 
     def _capture_datapoints(self, fix: GNSSFix) -> list[Datapoint]:
         timestamp = f"{datetime.now(UTC).isoformat()}Z"
