@@ -36,6 +36,6 @@ def load_config(path: Path) -> AppConfig:
         raw = tomllib.load(f)
     return AppConfig(
         modem=ModemConfig(**raw["modem"]),
-        gnss_receiver=GnssConfig(**raw["gnss"]),
+        gnss_receiver=GnssConfig(**raw["gnss_receiver"]),
         collector=CollectorConfig(**raw.get("collector", {})),
     )

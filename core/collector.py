@@ -6,6 +6,8 @@ import pynmea2
 import threading
 from datetime import datetime, UTC
 from dataclasses import dataclass
+
+from core.config import CollectorConfig
 from gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
 from modems.modem import Modem, CellSample
 
@@ -18,19 +20,16 @@ class Datapoint:
 
 
 class Collector:
-    def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver,
-                 position_threshold: float, max_idle_time: float, max_wait_for_fix: int,
-                 wait_log_interval: float,  keep_alive_host: str, keep_alive_port: int,
-                 keep_alive_interval_s: float ):
+    def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig):
         self._modem = modem
         self._gnss_receiver = gnss_receiver
-        self._position_threshold = position_threshold
-        self._max_idle_time = max_idle_time
-        self._max_wait_for_fix = max_wait_for_fix
-        self._wait_log_interval = wait_log_interval
-        self._keep_alive_host = keep_alive_host
-        self._keep_alive_port = keep_alive_port
-        self._keep_alive_interval_s = keep_alive_interval_s
+        self._position_threshold = config.position_threshold
+        self._max_idle_time = config.max_idle_time
+        self._max_wait_for_fix = config.max_wait_for_fix
+        self._wait_log_interval = config.wait_log_interval
+        self._keep_alive_host = config.keep_alive_host
+        self._keep_alive_port = config.keep_alive_port
+        self._keep_alive_interval_s = config.keep_alive_interval_s
 
     def collect(self) -> list[Datapoint]:
         self._modem.open()
