@@ -5,7 +5,7 @@ from gnss.gnss_receiver import GNSSReceiver
 from gnss.nmea_serial import NMEASerial
 
 _GNSS_FACTORIES: dict[str, Callable[[GnssConfig], GNSSReceiver]] = {
-    "quectel": lambda cfg: NMEASerial(), # TODO: add arguments when implemented!
+    "quectel": lambda config: NMEASerial(config=config),
 }
 
 def create_gnss_receiver(config: GnssConfig) -> GNSSReceiver:

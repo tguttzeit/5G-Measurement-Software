@@ -5,7 +5,7 @@ from modems.modem import Modem
 from modems.quectel import Quectel
 
 _MODEM_FACTORIES: dict[str, Callable[[ModemConfig], Modem]] = {
-    "quectel": lambda cfg: Quectel(port=cfg.port, baud_rate=cfg.baud_rate, timeout=cfg.timeout),
+    "quectel": lambda config: Quectel(config=config),
 }
 
 def create_modem(config: ModemConfig) -> Modem:

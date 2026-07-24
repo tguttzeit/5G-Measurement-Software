@@ -8,6 +8,7 @@ timeout = 1.0
 type = "nmea_serial"
 port = "/dev/serial0"
 baud_rate = 9600
+timeout = 1.0
 
 [collector]
 position_threshold = 15

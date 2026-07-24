@@ -14,6 +14,7 @@ class GnssConfig:
     type: str
     port: str
     baud_rate: int
+    timeout: float
 
 @dataclass
 class CollectorConfig:
@@ -28,7 +29,7 @@ class CollectorConfig:
 @dataclass
 class LoggingConfig:
     level: str = "INFO"
-    log_file: str = "file.log" # TODO: find something good here
+    log_file: str = "/add/your/log/file/here"
     max_bytes: int = 5_000_000
     backup_count: int = 3
 

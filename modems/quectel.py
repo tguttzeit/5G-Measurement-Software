@@ -2,15 +2,16 @@ import logging
 import time
 import serial
 
+from core.config import ModemConfig
 from modems.modem import Modem, CellSample
 
 
 class Quectel(Modem):
-    def __init__(self, port: str, baud_rate: int = 115200, timeout: float = 1.0):
+    def __init__(self, config: ModemConfig):
         self._logger = logging.getLogger(__name__)
-        self._port = port
-        self._baud_rate = baud_rate
-        self._timeout = timeout
+        self._port = config.port
+        self._baud_rate = config.baud_rate
+        self._timeout = config.timeout
         self._serial: serial.Serial | None = None
 
     def open(self) -> None:
@@ -37,7 +38,6 @@ class Quectel(Modem):
             raise RuntimeError("Modem is not open. Call open() before using it.")
         return self._serial
 
-    @staticmethod
     def _parse_qeng_response(self, response: str) -> list[CellSample]:
         results: list[CellSample] = []
         for line in response.splitlines():
@@ -60,8 +60,7 @@ class Quectel(Modem):
 
         if not results:
             pass
-            # TODO: Add logging
-            # log("WARN: Keine +QENG-Messwerte gefunden")
+            self._logger.warning("No QENG measurements found!")
         return results
 
     @staticmethod
