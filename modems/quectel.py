@@ -4,7 +4,11 @@ import serial
 
 from core.config import ModemConfig
 from modems.modem import Modem, CellSample
+from enum import StrEnum
 
+class QuectelMode(StrEnum):
+    SERVING_CELL = "serving_cell"
+    SA_SCAN = "sa_scan"
 
 class Quectel(Modem):
     def __init__(self, config: ModemConfig):
@@ -12,6 +16,7 @@ class Quectel(Modem):
         self._port = config.port
         self._baud_rate = config.baud_rate
         self._timeout = config.timeout
+        self._mode = QuectelMode(config.mode)
         self._serial: serial.Serial | None = None
 
     def open(self) -> None:
@@ -23,10 +28,9 @@ class Quectel(Modem):
             self._serial = None
 
     def query_cell_info(self) -> list[CellSample]:
-        self._connection.write(b'AT+QENG="servingcell"\r')
-        time.sleep(0.5)
-        resp = self._connection.read_all().decode(errors="ignore")
-        return self._parse_qeng_response(resp)
+        if self._mode == QuectelMode.SA_SCAN:
+            return self._query_sa_scan()
+        return self._query_serving_cell()
 
     def power_down(self) -> None:
         self._connection.write(b'AT+QPOWD=1\r')
@@ -37,6 +41,19 @@ class Quectel(Modem):
         if self._serial is None:
             raise RuntimeError("Modem is not open. Call open() before using it.")
         return self._serial
+
+    def _query_serving_cell(self) -> list[CellSample]:
+        self._connection.write(b'AT+QENG="servingcell"\r')
+        time.sleep(0.5)
+        resp = self._connection.read_all().decode(errors="ignore")
+        return self._parse_qeng_response(resp)
+
+    def _query_sa_scan(self) -> list[CellSample]:
+        self._logger.info("Running AT+QSCAN=1,1 (NR5G-SA-only scan)")
+        self._connection.write(b'AT+QSCAN=1,1\r')
+        time.sleep(7)
+        resp = self._connection.read_all().decode(errors="ignore")
+        return self._parse_qscan_response(resp)
 
     def _parse_qeng_response(self, response: str) -> list[CellSample]:
         results: list[CellSample] = []
@@ -61,6 +78,37 @@ class Quectel(Modem):
         if not results:
             pass
             self._logger.warning("No QENG measurements found!")
+        return results
+
+    def _parse_qscan_response(self, response: str) -> list[CellSample]:
+        results: list[CellSample] = []
+        for line in response.splitlines():
+            if not line.startswith("+QSCAN:"):
+                continue
+
+            parts = [Quectel._clean(p) for p in line[len("+QSCAN:"):].strip().split(",")]
+            if not parts or parts[0] != "NR5G-SA":
+                continue
+
+            try:
+                results.append(CellSample(
+                    rat=parts[0],
+                    mcc=Quectel._to_int(parts[1]),
+                    mnc=Quectel._to_int(parts[2]),
+                    tac=Quectel._to_int(parts[3]),
+                    pci=Quectel._to_int(parts[4]),
+                    channel=Quectel._to_int(parts[6]),
+                    band=Quectel._to_int(parts[7]),
+                    rsrp=Quectel._to_float(parts[9]),
+                    rsrq=Quectel._to_float(parts[10]),
+                    sinr=Quectel._to_float(parts[11]),
+                ))
+            except IndexError as e:
+                self._logger.warning("Error parsing QSCAN line: %s", e)
+                continue
+
+        if not results:
+            self._logger.warning("No NR5G-SA cells found via QSCAN")
         return results
 
     @staticmethod

@@ -8,6 +8,7 @@ class ModemConfig:
     port: str
     baud_rate: int
     timeout: float
+    mode: str = "serving_cell"
 
 @dataclass
 class GnssConfig:

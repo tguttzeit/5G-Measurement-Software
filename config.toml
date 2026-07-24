@@ -3,6 +3,13 @@ type = "quectel"
 port = "/dev/ttyUSB2"
 baud_rate = 115200
 timeout = 1.0
+# "servingcell" (Standard, AT+QENG) or "sa_scan" (AT+QSCAN, NR5G-SA-only).
+# For "sa_scan", band/modus have to be set manually via AT console before running:
+#   AT+QNWPREFCFG="mode_pref",NR5GSA
+#   AT+QNWPREFCFG="nr5g_disable",0
+#   AT+QNWPREFCFG="nsa_disable",1
+#   AT+QNWPREFCFG="lte_disable",1
+mode = "serving_cell"
 
 [gnss_receiver]
 type = "nmea_serial"
