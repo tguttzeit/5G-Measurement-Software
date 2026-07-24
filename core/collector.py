@@ -1,12 +1,12 @@
 import logging
-import socket
-import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, UTC
 from math import radians, sin, cos, asin, sqrt
+from typing import Iterator
 
 from core.config import CollectorConfig
+from core.keep_modem_alive_sender import KeepModemAliveSender
 from gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
 from modems.modem import Modem, CellSample
 
@@ -29,9 +29,9 @@ class Collector:
         self._max_wait_for_first_fix = config.max_wait_for_first_fix
         self._wait_log_interval = config.wait_log_interval
 
-        self._keep_alive_host = config.keep_alive_host
-        self._keep_alive_port = config.keep_alive_port
-        self._keep_alive_interval_s = config.keep_alive_interval_s
+        self._keep_modem_alive = KeepModemAliveSender(
+            config.keep_alive_host, config.keep_alive_port, config.keep_alive_interval_s
+        )
 
         self._last_pos: Position | None = None
         self._last_movement_time: float | None = None
@@ -41,9 +41,8 @@ class Collector:
         self._gnss_receiver.open()
         time.sleep(1)
 
+        self._keep_modem_alive.start()
         self._logger.info("Starting data collection...")
-
-        self._start_keep_alive_thread()
 
         try:
             first_fix = self._wait_for_first_fix()
@@ -55,46 +54,19 @@ class Collector:
             self._last_movement_time = None
 
             for fix in self._iter_fixes(first_fix):
-                if not self._has_moved_enough(fix):
-                    continue
-
-                datapoints.extend(self._capture_datapoints(fix))
+                if self._has_moved_enough(fix):
+                    datapoints.extend(self._capture_datapoints(fix))
 
                 if self._has_been_idle_too_long():
                     break
+
         finally:
-            self._stop_keep_alive_thread()
+            self._keep_modem_alive.stop()
             self._gnss_receiver.close()
             self._modem.close()
             self._logger.info("Finished data collection")
 
         return datapoints
-
-    def _start_keep_alive_thread(self, ) -> None:
-        self._keep_alive_stop_event = threading.Event()
-        self._keep_alive_thread = threading.Thread(target=self.keep_link_alive, args=(self._keep_alive_stop_event,),
-                                                   daemon=True)
-        self._keep_alive_thread.start()
-
-    def keep_link_alive(self, stop_event: threading.Event):
-        """Kleines UDP-Paket alle KEEPALIVE_INTERVAL Sekunden senden."""
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.settimeout(2)
-            pkt = b"\x00"  # 1-Byte-Payload
-            next_timestamp = time.time()
-            while not stop_event.is_set():
-                now = time.time()
-                if now >= next_timestamp:
-                    try:
-                        s.sendto(pkt, (self._keep_alive_host, self._keep_alive_port))
-                    except OSError:
-                        pass  # Netzwerk gerade nicht verfügbar
-                    next_timestamp = now + self._keep_alive_interval_s
-                time.sleep(0.2)
-
-    def _stop_keep_alive_thread(self):
-        self._keep_alive_stop_event.set()
-        self._keep_alive_thread.join()
 
     def _wait_for_first_fix(self) -> GNSSFix | None:
         start = time.time()
@@ -116,7 +88,7 @@ class Collector:
             if fix is not None:
                 return fix
 
-    def _iter_fixes(self, first_fix: GNSSFix):
+    def _iter_fixes(self, first_fix: GNSSFix) -> Iterator[GNSSFix]:
         yield first_fix
         while True:
             fix = self._gnss_receiver.read_fix()
