@@ -27,7 +27,7 @@ class Collector:
         self._gnss_receiver = gnss_receiver
         self._position_threshold = config.position_threshold
         self._max_idle_time = config.max_idle_time
-        self._max_wait_for_fix = config.max_wait_for_fix
+        self._max_wait_for_first_fix = config.max_wait_for_first_fix
         self._wait_log_interval = config.wait_log_interval
         self._keep_alive_host = config.keep_alive_host
         self._keep_alive_port = config.keep_alive_port
@@ -38,16 +38,15 @@ class Collector:
         self._gnss_receiver.open()
         time.sleep(1)
 
-        data_points: list[Datapoint] = []
+        datapoints: list[Datapoint] = []
         last_pos: Position | None = None
-        idle_start: float | None = None
+        idle_start: float | None
 
         gps_fix = False
         fix_wait_start = time.time()
         last_wait_log = 0
 
-
-        # log("Starte Datenerfassung")
+        self._logger.info("Starting data collection...")
 
         # Keep-Alive-Thread starten
         keep_alive_stop_event = threading.Event()
@@ -57,9 +56,16 @@ class Collector:
         try:
             while True:
                 # GPS-Fix Timeout
-                if not gps_fix and (time.time() - fix_wait_start) > self._max_wait_for_fix:
-                    # log(f"Kein GPS-Fix innerhalb von {self._max_wait_for_fix}s - Abbruch.")
+                if not gps_fix and (time.time() - fix_wait_start) > self._max_wait_for_first_fix:
+                    self._logger.info("No GPS fix in specified interval of %s s. - Aborting.",
+                                      self._max_wait_for_first_fix)
                     break
+
+                now = time.time()
+                if not gps_fix and (now - last_wait_log) >= self._wait_log_interval:
+                    self._logger.info("Waiting for first GPS fix… (for %s s by now)",
+                                      int(now - fix_wait_start))
+                    last_wait_log = now
 
                 fix = self._gnss_receiver.read_fix()
                 if fix is None:
@@ -68,31 +74,24 @@ class Collector:
                 if not gps_fix:
                     gps_fix = True
 
-
-                # Bewegungsdetektion
                 if last_pos is not None:
                     dist = Collector.haversine(last_pos, fix.position)
                     if dist < self._position_threshold:
-                        # log(f"Keine Bewegung erkannt: {dist:.1f} m (<{self._position_threshold} m)")
-                        continue  # Keine relevante Bewegung
+                        self._logger.debug("No relevant movement detected: %.1f m (< %s m (specified threshold))",
+                                          dist, self._position_threshold)
+                        continue
+                    self._logger.info("Enough movement detected: %.1f m", dist)
                 last_pos = fix.position
                 idle_start = None  # Reset Idle-Timer
-                #log(f"Bewegung erkannt: {dist:.1f} m")
 
-                # Warnung bei wenig Satelliten
                 if int(fix.num_satellites) < 5:
-                    pass
-                    # log(f"WARNUNG: Geringe Satellitenzahl ({msg.num_sats}) - Messung ungenau.")
+                    self._logger.warning("Low satellite count (%s) - low measurement precision")
 
-                # 5G-Daten holen (kann mehrere Dicts liefern) -> Timestamp vorher berechnen
-                timestamp = datetime.now(UTC).isoformat() + "Z"
+                timestamp = f"{datetime.now(UTC).isoformat()}Z"
                 for modem_data in self._modem.query_cell_info():
-                    data_points.append(Datapoint(
-                        timestamp=timestamp,
-                        fix=fix,
-                        cell_sample=modem_data
-                    ))
-                    # log(f"Punkt erfasst: {entry}")
+                    datapoint = Datapoint(timestamp=timestamp, fix=fix, cell_sample=modem_data)
+                    datapoints.append(datapoint)
+                    self._logger.debug("Datapoint captured: %s", datapoint)
 
                 # Idle-Timer setzen
                 if idle_start is None:
@@ -100,16 +99,17 @@ class Collector:
 
                 # Messung beenden bei langem Stillstand
                 if gps_fix and idle_start and (time.time() - idle_start) >= self._max_idle_time:
-                    # log("Keine Bewegung mehr - Datenerfassung beendet.")
+                    self._logger.info("No movement for %s s. Ending data collection.",
+                                      self._max_idle_time)
                     break
         finally:
             keep_alive_stop_event.set()
             keep_alive_thread.join()
             self._gnss_receiver.close()
             self._modem.close()
-            # log("Datenerfassung abgeschlossen")
+            self._logger.info("Finished data collection")
 
-        return data_points
+        return datapoints
 
     def keep_link_alive(self, stop_event: threading.Event):
         """Kleines UDP-Paket alle KEEPALIVE_INTERVAL Sekunden senden."""

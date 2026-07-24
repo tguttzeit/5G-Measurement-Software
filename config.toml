@@ -12,7 +12,7 @@ baud_rate = 9600
 [collector]
 position_threshold = 15
 max_idle_time = 200
-max_wait_for_fix = 300
+max_wait_for_first_fix = 300
 wait_log_interval = 5
 keep_alive_host = "8.8.8.8"
 keep_alive_port = 53

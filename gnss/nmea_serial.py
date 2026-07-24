@@ -19,7 +19,9 @@ class NMEASerial(GNSSReceiver):
         self._serial.reset_input_buffer()
 
     def close(self) -> None:
-        raise NotImplementedError
+        if self._serial is not None:
+            self._serial.close()
+            self._serial = None
 
     def read_fix(self) -> GNSSFix | None:
         line = self._connection.readline().decode(errors="replace").strip()
