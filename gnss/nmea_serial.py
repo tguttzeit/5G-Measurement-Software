@@ -42,5 +42,5 @@ class NMEASerial(GNSSReceiver):
     @property
     def _connection(self) -> serial.Serial:
         if self._serial is None:
-            raise RuntimeError("Modem is not open. Call open() before using it.")
+            raise RuntimeError("GNSS receiver is not open. Call open() before using it.")
         return self._serial
