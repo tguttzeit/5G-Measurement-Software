@@ -32,3 +32,8 @@ level = "INFO"
 log_file = "5g-measurement.log"
 max_bytes = 5_000_000
 backup_count = 3
+
+[system]
+running_on_pi = false
+shutdown_gpio = 17
+network_interfaces = ["wlan0", "wwan0"]

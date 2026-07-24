@@ -43,12 +43,19 @@ class LoggingConfig:
     backup_count: int = 3
 
 @dataclass
+class SystemConfig:
+    running_on_pi: bool = True
+    shutdown_gpio: int = 17
+    network_interfaces: tuple[str, ...] = ("wlan0", "wwan0")
+
+@dataclass
 class AppConfig:
     modem: ModemConfig
     gnss_receiver: GnssConfig
     collector: CollectorConfig
     uploader: UploaderConfig
     logging: LoggingConfig
+    system: SystemConfig
 
 def load_config(path: Path) -> AppConfig:
     with open(path, "rb") as f:
@@ -58,5 +65,6 @@ def load_config(path: Path) -> AppConfig:
         gnss_receiver=GnssConfig(**raw["gnss_receiver"]),
         collector=CollectorConfig(**raw.get("collector", {})),
         uploader=UploaderConfig(**raw["uploader"]),
-        logging=LoggingConfig(**raw.get("logging", {}))
+        logging=LoggingConfig(**raw.get("logging", {})),
+        system=SystemConfig(**raw.get("system", {})),
     )
