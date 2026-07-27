@@ -10,6 +10,8 @@ from measurement_software.core.config import UploaderConfig
 
 
 class Uploader:
+    """Saves collected datapoints to disk and uploads pending files to the remote server via scp."""
+
     def __init__(self, config: UploaderConfig):
         self._logger = logging.getLogger(__name__)
         self._upload_dir = Path(config.upload_dir)
@@ -20,6 +22,7 @@ class Uploader:
         self._debug_upload = config.debug_upload
 
     def save_datapoints(self, datapoints: list[Datapoint]) -> None:
+        """Writes datapoints to a timestamped JSON file in the upload directory."""
         if not datapoints:
             self._logger.info("No datapoints to save - skipping.")
             return
@@ -34,6 +37,7 @@ class Uploader:
         self._logger.info("%d datapoints saved to %s", len(datapoints), filename)
 
     def upload_pending_files(self) -> None:
+        """Uploads every pending JSON file via scp if a network interface is up, deleting each on success."""
         if not (self._is_interface_up("wlan0") or self._is_interface_up("wwan0")):
             self._logger.info("No network available, upload postponed.")
             return
@@ -41,6 +45,7 @@ class Uploader:
             self._upload_file(filepath)
 
     def _upload_file(self, filepath: Path) -> None:
+        """Uploads a single file via scp, deleting it locally only if the transfer succeeds."""
         remote = f"{self._user}@{self._host}:{self._remote_dir}{filepath.name}"
         self._logger.info("Starting upload: %s", filepath.name)
 
@@ -70,6 +75,7 @@ class Uploader:
 
     @staticmethod
     def _is_interface_up(iface: str) -> bool:
+        """Returns True if the given network interface has an IPv4 address assigned."""
         try:
             out = subprocess.check_output(
                 ["ip", "addr", "show", iface], stderr=subprocess.DEVNULL
@@ -80,6 +86,7 @@ class Uploader:
 
     @staticmethod
     def _get_interface_ip(iface: str) -> str | None:
+        """Returns the interface's IPv4 address, or None if it has none."""
         try:
             out = subprocess.check_output(
                 ["ip", "-4", "-o", "addr", "show", "dev", iface]

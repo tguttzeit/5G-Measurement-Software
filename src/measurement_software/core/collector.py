@@ -13,12 +13,16 @@ from measurement_software.modems.modem import Modem, CellSample
 
 @dataclass
 class Datapoint:
+    """A single cell-info sample paired with the GNSS fix and timestamp it was captured at."""
+
     timestamp: str
     fix: GNSSFix
     cell_sample: CellSample
 
 
 class Collector:
+    """Runs a GPS-triggered measurement session, sampling the modem whenever the device moves."""
+
     def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig):
         self._logger = logging.getLogger(__name__)
         self._modem = modem
@@ -37,6 +41,7 @@ class Collector:
         self._last_movement_time: float | None = None
 
     def collect(self) -> list[Datapoint]:
+        """Waits for a GPS fix, then collects datapoints until movement stops for too long."""
         self._modem.open()
         self._gnss_receiver.open()
         time.sleep(1)
@@ -69,6 +74,7 @@ class Collector:
         return datapoints
 
     def _wait_for_first_fix(self) -> GNSSFix | None:
+        """Blocks until the receiver reports a fix, or returns None if none arrives in time."""
         start = time.time()
         last_wait_log = 0.0
 
@@ -89,6 +95,7 @@ class Collector:
                 return fix
 
     def _iter_fixes(self, first_fix: GNSSFix) -> Iterator[GNSSFix]:
+        """Yields the first fix, then every subsequent non-None fix from the receiver, forever."""
         yield first_fix
         while True:
             fix = self._gnss_receiver.read_fix()
@@ -96,6 +103,7 @@ class Collector:
                 yield fix
 
     def _has_moved_enough(self, fix: GNSSFix) -> bool:
+        """Returns True and updates the reference position if the fix cleared the movement threshold."""
         if self._last_pos is None:
             self._last_pos = fix.position
             return True
@@ -115,6 +123,7 @@ class Collector:
 
     @staticmethod
     def haversine(old_position: Position, new_position: Position) -> float:
+        """Great-circle distance between two positions, in meters."""
         r = 6371000
         d_latitude = radians(new_position.latitude - old_position.latitude)
         d_longitude = radians(new_position.longitude - old_position.longitude)
@@ -123,6 +132,7 @@ class Collector:
         return 2 * r * asin(sqrt(a + b))
 
     def _capture_datapoints(self, fix: GNSSFix) -> list[Datapoint]:
+        """Queries the modem and pairs each cell sample with the given fix and current timestamp."""
         timestamp = f"{datetime.now(UTC).isoformat()}Z"
         datapoints: list[Datapoint] = []
         for modem_data in self._modem.query_cell_info():
@@ -132,6 +142,7 @@ class Collector:
         return datapoints
 
     def _has_been_idle_too_long(self) -> bool:
+        """Returns True once the device has gone without movement for longer than max_idle_time."""
         if self._last_movement_time is None:
             self._last_movement_time = time.time()
             return False

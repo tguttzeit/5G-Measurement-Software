@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 def setup_gpio(pin: int) -> None:
+    """Configures the shutdown pin as a low output (Raspberry Pi only)."""
     import RPi.GPIO as GPIO
     GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BCM)
@@ -18,16 +19,19 @@ def setup_gpio(pin: int) -> None:
 
 
 def signal_completion(pin: int) -> None:
+    """Drives the shutdown pin high to signal that the measurement run finished."""
     import RPi.GPIO as GPIO
     GPIO.output(pin, GPIO.HIGH)
 
 
 def cleanup_gpio() -> None:
+    """Releases the GPIO pins."""
     import RPi.GPIO as GPIO
     GPIO.cleanup()
 
 
 def log_ip_addrs(interfaces: tuple[str, ...] = ("wlan0", "wwan0")) -> None:
+    """Logs the current IPv4 address, or its absence, for each given network interface."""
     for iface in interfaces:
         try:
             out = subprocess.check_output(
@@ -43,6 +47,7 @@ def log_ip_addrs(interfaces: tuple[str, ...] = ("wlan0", "wwan0")) -> None:
 
 
 def perform_shutdown(modem_config: ModemConfig) -> None:
+    """Powers down the modem if possible, then shuts down the system."""
     try:
         modem = create_modem(modem_config)
         modem.open()

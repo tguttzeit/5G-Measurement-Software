@@ -9,6 +9,7 @@ _GNSS_FACTORIES: dict[str, Callable[[GnssConfig], GNSSReceiver]] = {
 }
 
 def create_gnss_receiver(config: GnssConfig) -> GNSSReceiver:
+    """Builds the GNSSReceiver implementation configured for config.type."""
     try:
         factory = _GNSS_FACTORIES[config.type]
     except KeyError:

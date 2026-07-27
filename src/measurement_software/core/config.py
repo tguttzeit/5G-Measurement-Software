@@ -1,9 +1,11 @@
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 @dataclass
 class ModemConfig:
+    """Serial connection and query-mode settings for the cellular modem."""
+
     type: str
     port: str
     baud_rate: int
@@ -12,6 +14,8 @@ class ModemConfig:
 
 @dataclass
 class GnssConfig:
+    """Serial connection settings for the GNSS receiver."""
+
     type: str
     port: str
     baud_rate: int
@@ -19,6 +23,8 @@ class GnssConfig:
 
 @dataclass
 class CollectorConfig:
+    """Thresholds controlling when a measurement is captured and when a session ends."""
+
     position_threshold: float = 15
     max_idle_time: float = 200
     max_wait_for_first_fix: float = 300
@@ -29,6 +35,8 @@ class CollectorConfig:
 
 @dataclass
 class UploaderConfig:
+    """Local storage and scp destination settings for uploading saved measurements."""
+
     upload_dir: str
     upload_user: str
     upload_host: str
@@ -38,6 +46,8 @@ class UploaderConfig:
 
 @dataclass
 class LoggingConfig:
+    """Log level and rotating-file settings."""
+
     level: str = "INFO"
     log_file: str = "/add/your/log/file/here"
     max_bytes: int = 5_000_000
@@ -45,12 +55,16 @@ class LoggingConfig:
 
 @dataclass
 class SystemConfig:
+    """Raspberry Pi hardware settings: GPIO shutdown signalling and network interfaces to report."""
+
     running_on_pi: bool = True
     shutdown_gpio: int = 17
     network_interfaces: tuple[str, ...] = ("wlan0", "wwan0")
 
 @dataclass
 class AppConfig:
+    """Top-level application configuration, assembled from config.toml."""
+
     modem: ModemConfig
     gnss_receiver: GnssConfig
     collector: CollectorConfig
@@ -59,6 +73,7 @@ class AppConfig:
     system: SystemConfig
 
 def load_config(path: Path) -> AppConfig:
+    """Reads config.toml and builds an AppConfig, applying defaults for omitted optional sections."""
     with open(path, "rb") as f:
         raw = tomllib.load(f)
     return AppConfig(

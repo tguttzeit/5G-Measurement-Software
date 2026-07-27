@@ -8,6 +8,8 @@ from measurement_software.gnss.gnss_receiver import GNSSReceiver, GNSSFix, Posit
 
 
 class NMEASerial(GNSSReceiver):
+    """GNSSReceiver implementation that reads GGA sentences from a serial NMEA stream."""
+
     def __init__(self, config: GnssConfig):
         self._logger = logging.getLogger(__name__)
         self._port = config.port
@@ -25,6 +27,7 @@ class NMEASerial(GNSSReceiver):
             self._serial = None
 
     def read_fix(self) -> GNSSFix | None:
+        """Reads one line and returns its GGA fix, or None if it isn't a valid GGA fix."""
         line = self._connection.readline().decode(errors="replace").strip()
         if not line.startswith(("$GNGGA", "$GPGGA")):
             return None

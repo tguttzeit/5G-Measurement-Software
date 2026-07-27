@@ -14,10 +14,12 @@ from measurement_software.core.system import setup_gpio, signal_completion, clea
 logger = logging.getLogger(__name__)
 
 def handle_sigint(signum, frame):
+    """Exits immediately on Ctrl-C without triggering a shutdown."""
     logger.info("SIGINT received - user abort, no shutdown.")
     sys.exit(0)
 
 def main() -> AppConfig:
+    """Loads configuration, runs one measurement collection cycle, and uploads the results."""
     config_path = Path(__file__).resolve().parent.parent.parent / "config.toml"
     config = load_config(config_path)
     setup_logging(config.logging)

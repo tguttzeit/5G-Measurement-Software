@@ -6,6 +6,7 @@ from measurement_software.core.config import LoggingConfig
 
 
 def setup_logging(config: LoggingConfig) -> None:
+    """Configures root logging with rotating-file and console handlers per the given config."""
     log_path = Path(config.log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 

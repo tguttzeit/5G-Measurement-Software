@@ -7,10 +7,14 @@ from measurement_software.modems.modem import Modem, CellSample
 from enum import StrEnum
 
 class QuectelMode(StrEnum):
+    """Which AT command the modem is queried with: the active serving cell or an NR5G-SA scan."""
+
     SERVING_CELL = "serving_cell"
     SA_SCAN = "sa_scan"
 
 class Quectel(Modem):
+    """Modem implementation for Quectel modules, driven over a serial AT command interface."""
+
     def __init__(self, config: ModemConfig):
         self._logger = logging.getLogger(__name__)
         self._port = config.port
@@ -28,6 +32,7 @@ class Quectel(Modem):
             self._serial = None
 
     def query_cell_info(self) -> list[CellSample]:
+        """Queries the modem using the configured mode and parses the response into CellSamples."""
         if self._mode == QuectelMode.SA_SCAN:
             return self._query_sa_scan()
         return self._query_serving_cell()
@@ -56,6 +61,7 @@ class Quectel(Modem):
         return self._parse_qscan_response(resp)
 
     def _parse_qeng_response(self, response: str) -> list[CellSample]:
+        """Parses an AT+QENG="servingcell" response into CellSamples, skipping the header echo."""
         results: list[CellSample] = []
         for line in response.splitlines():
             if not line.startswith("+QENG:"):
@@ -81,6 +87,7 @@ class Quectel(Modem):
         return results
 
     def _parse_qscan_response(self, response: str) -> list[CellSample]:
+        """Parses an AT+QSCAN=1,1 response into CellSamples, keeping only NR5G-SA results."""
         results: list[CellSample] = []
         for line in response.splitlines():
             if not line.startswith("+QSCAN:"):
@@ -113,6 +120,7 @@ class Quectel(Modem):
 
     @staticmethod
     def _parse_lte(parts: list[str | None]) -> CellSample:
+        """Builds a CellSample from a parsed LTE +QENG data line."""
         return CellSample(
             rat="LTE",
             mcc=Quectel._to_int(parts[2]),
@@ -136,6 +144,7 @@ class Quectel(Modem):
 
     @staticmethod
     def _parse_nr5g(parts: list[str | None], rat: str) -> CellSample:
+        """Builds a CellSample from a parsed NR5G-SA/NSA +QENG data line."""
         return CellSample(
             rat=rat,
             mcc=Quectel._to_int(parts[1]),

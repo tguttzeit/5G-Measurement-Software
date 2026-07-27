@@ -9,6 +9,7 @@ _MODEM_FACTORIES: dict[str, Callable[[ModemConfig], Modem]] = {
 }
 
 def create_modem(config: ModemConfig) -> Modem:
+    """Builds the Modem implementation configured for config.type."""
     try:
         factory = _MODEM_FACTORIES[config.type]
     except KeyError:

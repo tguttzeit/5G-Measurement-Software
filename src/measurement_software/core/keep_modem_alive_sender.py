@@ -5,6 +5,8 @@ import time
 
 
 class KeepModemAliveSender:
+    """Sends a periodic UDP heartbeat on a background thread to keep the modem's link alive."""
+
     def __init__(self, host: str, port: int, interval_s: float):
         self._logger = logging.getLogger(__name__)
         self._host = host
@@ -14,11 +16,13 @@ class KeepModemAliveSender:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        """Starts the background heartbeat thread."""
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, args=(self._stop_event,), daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        """Signals the heartbeat thread to stop and waits for it to exit."""
         if self._stop_event is not None:
             self._stop_event.set()
         if self._thread is not None:
