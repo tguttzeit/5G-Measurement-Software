@@ -3,8 +3,8 @@ import re
 import subprocess
 import time
 
-from core.config import ModemConfig
-from modems import create_modem
+from measurement_software.core.config import ModemConfig
+from measurement_software.modems import create_modem
 
 logger = logging.getLogger(__name__)
 

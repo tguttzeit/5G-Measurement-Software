@@ -3,8 +3,8 @@ import logging
 import pynmea2
 import serial
 
-from core.config import GnssConfig
-from gnss.gnss_receiver import GNSSReceiver, GNSSFix, Position
+from measurement_software.core.config import GnssConfig
+from measurement_software.gnss.gnss_receiver import GNSSReceiver, GNSSFix, Position
 
 
 class NMEASerial(GNSSReceiver):

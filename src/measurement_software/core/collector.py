@@ -5,10 +5,10 @@ from datetime import datetime, UTC
 from math import radians, sin, cos, asin, sqrt
 from typing import Iterator
 
-from core.config import CollectorConfig
-from core.keep_modem_alive_sender import KeepModemAliveSender
-from gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
-from modems.modem import Modem, CellSample
+from measurement_software.core.config import CollectorConfig
+from measurement_software.core.keep_modem_alive_sender import KeepModemAliveSender
+from measurement_software.gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
+from measurement_software.modems.modem import Modem, CellSample
 
 
 @dataclass

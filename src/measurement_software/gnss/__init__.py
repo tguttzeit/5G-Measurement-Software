@@ -1,8 +1,8 @@
 from typing import Callable
 
-from core.config import GnssConfig
-from gnss.gnss_receiver import GNSSReceiver
-from gnss.nmea_serial import NMEASerial
+from measurement_software.core.config import GnssConfig
+from measurement_software.gnss.gnss_receiver import GNSSReceiver
+from measurement_software.gnss.nmea_serial import NMEASerial
 
 _GNSS_FACTORIES: dict[str, Callable[[GnssConfig], GNSSReceiver]] = {
     "quectel": lambda config: NMEASerial(config=config),

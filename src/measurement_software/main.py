@@ -3,13 +3,13 @@ import signal
 import sys
 from pathlib import Path
 
-from core.collector import Collector
-from core.config import load_config, AppConfig
-from core.logging_setup import setup_logging
-from core.uploader import Uploader
-from gnss import create_gnss_receiver
-from modems import create_modem
-from core.system import setup_gpio, signal_completion, cleanup_gpio, perform_shutdown, log_ip_addrs
+from measurement_software.core.collector import Collector
+from measurement_software.core.config import load_config, AppConfig
+from measurement_software.core.logging_setup import setup_logging
+from measurement_software.core.uploader import Uploader
+from measurement_software.gnss import create_gnss_receiver
+from measurement_software.modems import create_modem
+from measurement_software.core.system import setup_gpio, signal_completion, cleanup_gpio, perform_shutdown, log_ip_addrs
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,8 @@ def handle_sigint(signum, frame):
     sys.exit(0)
 
 def main() -> AppConfig:
-    config = load_config(Path("config.toml"))
+    config_path = Path(__file__).resolve().parent.parent.parent / "config.toml"
+    config = load_config(config_path)
     setup_logging(config.logging)
     signal.signal(signal.SIGINT, handle_sigint)
     if config.system.running_on_pi:

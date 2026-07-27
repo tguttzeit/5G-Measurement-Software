@@ -2,8 +2,8 @@ import logging
 import time
 import serial
 
-from core.config import ModemConfig
-from modems.modem import Modem, CellSample
+from measurement_software.core.config import ModemConfig
+from measurement_software.modems.modem import Modem, CellSample
 from enum import StrEnum
 
 class QuectelMode(StrEnum):

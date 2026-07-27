@@ -2,7 +2,7 @@ import logging
 import logging.config
 from pathlib import Path
 
-from core.config import LoggingConfig
+from measurement_software.core.config import LoggingConfig
 
 
 def setup_logging(config: LoggingConfig) -> None:

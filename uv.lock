@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 [[package]]
 name = "5g-measurement-software"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "pynmea2" },
     { name = "pyserial" },

@@ -1,8 +1,8 @@
 from typing import Callable
 
-from core.config import ModemConfig
-from modems.modem import Modem
-from modems.quectel import Quectel
+from measurement_software.core.config import ModemConfig
+from measurement_software.modems.modem import Modem
+from measurement_software.modems.quectel import Quectel
 
 _MODEM_FACTORIES: dict[str, Callable[[ModemConfig], Modem]] = {
     "quectel": lambda cfg: Quectel(config=cfg),
