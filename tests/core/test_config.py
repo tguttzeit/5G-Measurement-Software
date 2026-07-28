@@ -1,3 +1,4 @@
+import socket
 from pathlib import Path
 
 from measurement_software.core.config import load_config
@@ -34,6 +35,8 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.modem.type == "quectel"
     assert config.modem.port == "/dev/ttyUSB2"
     assert config.uploader.upload_host == "example.org"
+    assert config.device.device_id == socket.gethostname()
+    assert config.device.mission_type == "ground"
     assert config.collector.max_idle_time == 200
     assert config.collector.gps_enabled is True
     assert config.collector.gps_disabled_poll_interval_s == 5.0
@@ -48,6 +51,10 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
 
 def test_load_config_overrides_defaults_when_optional_sections_present(tmp_path):
     content = REQUIRED_SECTIONS + """
+[device]
+device_id = "pi-north-01"
+mission_type = "drone"
+
 [collector]
 max_idle_time = 42
 position_threshold = 5
@@ -62,6 +69,8 @@ running_on_pi = false
 """
     config = load_config(write_config(tmp_path, content))
 
+    assert config.device.device_id == "pi-north-01"
+    assert config.device.mission_type == "drone"
     assert config.collector.max_idle_time == 42
     assert config.collector.position_threshold == 5
     assert config.collector.gps_enabled is False

@@ -1,3 +1,4 @@
+import socket
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,17 @@ class GnssConfig:
     port: str
     baud_rate: int
     timeout: float
+
+@dataclass
+class DeviceConfig:
+    """Identifies this device/vehicle and mission type, carried on every captured datapoint.
+
+    `device_id` defaults to the Pi's hostname, which is already distinct per device in a fleet,
+    so a single-device setup needs no configuration at all.
+    """
+
+    device_id: str = field(default_factory=socket.gethostname)
+    mission_type: str = "ground"
 
 @dataclass
 class CollectorConfig:
@@ -104,6 +116,7 @@ class AppConfig:
 
     modem: ModemConfig
     gnss_receiver: GnssConfig
+    device: DeviceConfig
     collector: CollectorConfig
     run_status: RunStatusConfig
     heartbeat: HeartbeatConfig
@@ -118,6 +131,7 @@ def load_config(path: Path) -> AppConfig:
     return AppConfig(
         modem=ModemConfig(**raw["modem"]),
         gnss_receiver=GnssConfig(**raw["gnss_receiver"]),
+        device=DeviceConfig(**raw.get("device", {})),
         collector=CollectorConfig(**raw.get("collector", {})),
         run_status=_build_run_status_config(raw.get("run_status", {})),
         heartbeat=HeartbeatConfig(**raw.get("heartbeat", {})),
