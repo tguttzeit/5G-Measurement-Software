@@ -1,4 +1,4 @@
-# 0012 — Extended heartbeat: pipeline-health definition and failure handling
+# 0013 — Extended heartbeat: pipeline-health definition and failure handling
 
 ## Context
 
