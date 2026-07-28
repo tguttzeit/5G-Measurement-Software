@@ -1,9 +1,17 @@
 import logging
+import os
 import time
 import serial
 
 from measurement_software.core.config import ModemConfig
-from measurement_software.modems.modem import Modem, CellSample
+from measurement_software.modems.modem import (
+    Modem,
+    CellSample,
+    SimPinNotConfiguredError,
+    SimPinRejectedError,
+    SimPukRequiredError,
+    SimStatusUnknownError,
+)
 from enum import StrEnum
 
 class QuectelMode(StrEnum):
@@ -22,6 +30,10 @@ class SimStatus(StrEnum):
 
 class Quectel(Modem):
     """Modem implementation for Quectel modules, driven over a serial AT command interface."""
+
+    SIM_PIN_ENV_VAR = "MODEM_SIM_PIN"
+    SIM_UNLOCK_POLL_ATTEMPTS = 10
+    SIM_UNLOCK_POLL_INTERVAL = 1.0
 
     def __init__(self, config: ModemConfig):
         self._logger = logging.getLogger(__name__)
@@ -48,6 +60,50 @@ class Quectel(Modem):
     def power_down(self) -> None:
         self._connection.write(b'AT+QPOWD=1\r')
         time.sleep(5)
+
+    def unlock_sim(self) -> None:
+        """Unlocks the SIM if it's PIN-locked, entering the PIN from MODEM_SIM_PIN at most once.
+
+        Never retries a rejected PIN and never attempts PUK entry - see SimUnlockError subclasses
+        for the possible failure modes.
+        """
+        status = self._query_sim_status()
+        if status == SimStatus.READY:
+            self._logger.info("SIM already unlocked.")
+            return
+        if status == SimStatus.SIM_PUK:
+            raise SimPukRequiredError("SIM requires a PUK; refusing to attempt PUK entry.")
+        if status != SimStatus.SIM_PIN:
+            raise SimStatusUnknownError(f"Could not determine SIM lock status (got {status!r}).")
+
+        pin = os.environ.get(self.SIM_PIN_ENV_VAR)
+        if not pin:
+            raise SimPinNotConfiguredError(
+                f"SIM is PIN-locked but {self.SIM_PIN_ENV_VAR} is not set."
+            )
+
+        response = self._send_pin(pin)
+        if "+CME ERROR" in response:
+            raise SimPinRejectedError("Modem rejected the SIM PIN; it will not be retried automatically.")
+        if "OK" not in response:
+            raise SimStatusUnknownError("No clear response after sending the SIM PIN.")
+
+        if not self._poll_until_ready():
+            raise SimStatusUnknownError("SIM did not reach READY after the PIN was accepted.")
+
+        self._logger.info("SIM unlocked.")
+
+    def _send_pin(self, pin: str) -> str:
+        self._connection.write(f'AT+CPIN="{pin}"\r'.encode())
+        time.sleep(0.5)
+        return self._connection.read_all().decode(errors="ignore")
+
+    def _poll_until_ready(self) -> bool:
+        for _ in range(self.SIM_UNLOCK_POLL_ATTEMPTS):
+            if self._query_sim_status() == SimStatus.READY:
+                return True
+            time.sleep(self.SIM_UNLOCK_POLL_INTERVAL)
+        return False
 
     def _query_sim_status(self) -> SimStatus:
         self._connection.write(b'AT+CPIN?\r')

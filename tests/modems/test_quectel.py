@@ -3,6 +3,12 @@ import logging
 import pytest
 
 from measurement_software.core.config import ModemConfig
+from measurement_software.modems.modem import (
+    SimPinNotConfiguredError,
+    SimPinRejectedError,
+    SimPukRequiredError,
+    SimStatusUnknownError,
+)
 from measurement_software.modems.quectel import Quectel, SimStatus
 
 
@@ -339,6 +345,102 @@ class TestQuerySimStatus:
 
         assert fake_serials[0].written == [b"AT+CPIN?\r"]
         assert status == SimStatus.READY
+
+
+class TestUnlockSim:
+    def _open_modem(self, fake_serials) -> Quectel:
+        modem = Quectel(make_config())
+        modem.open()
+        return modem
+
+    def test_already_unlocked_is_a_noop(self, fake_serials, monkeypatch):
+        monkeypatch.delenv(Quectel.SIM_PIN_ENV_VAR, raising=False)
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].response = b"+CPIN: READY\n\nOK\n"
+
+        modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r"]
+
+    def test_puk_required_raises_and_never_sends_a_pin(self, fake_serials, monkeypatch):
+        monkeypatch.setenv(Quectel.SIM_PIN_ENV_VAR, "1234")
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].response = b"+CPIN: SIM PUK\n\nOK\n"
+
+        with pytest.raises(SimPukRequiredError):
+            modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r"]
+
+    def test_unrecognized_status_raises(self, fake_serials):
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].response = b"garbled\n"
+
+        with pytest.raises(SimStatusUnknownError):
+            modem.unlock_sim()
+
+    def test_pin_not_configured_raises_and_does_not_send_a_pin(self, fake_serials, monkeypatch):
+        monkeypatch.delenv(Quectel.SIM_PIN_ENV_VAR, raising=False)
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].response = b"+CPIN: SIM PIN\n\nOK\n"
+
+        with pytest.raises(SimPinNotConfiguredError):
+            modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r"]
+
+    def test_correct_pin_unlocks(self, fake_serials, monkeypatch):
+        monkeypatch.setenv(Quectel.SIM_PIN_ENV_VAR, "1234")
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].responses = [
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"OK\n",
+            b"+CPIN: READY\n\nOK\n",
+        ]
+
+        modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r", b'AT+CPIN="1234"\r', b"AT+CPIN?\r"]
+
+    def test_wrong_pin_is_rejected_and_never_retried(self, fake_serials, monkeypatch):
+        monkeypatch.setenv(Quectel.SIM_PIN_ENV_VAR, "0000")
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].responses = [
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"+CME ERROR: 16\n",
+        ]
+
+        with pytest.raises(SimPinRejectedError):
+            modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r", b'AT+CPIN="0000"\r']
+
+    def test_ambiguous_response_after_sending_pin_raises(self, fake_serials, monkeypatch):
+        monkeypatch.setenv(Quectel.SIM_PIN_ENV_VAR, "1234")
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].responses = [
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"",
+        ]
+
+        with pytest.raises(SimStatusUnknownError):
+            modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r", b'AT+CPIN="1234"\r']
+
+    def test_never_reaching_ready_raises_without_resending_the_pin(self, fake_serials, monkeypatch):
+        monkeypatch.setenv(Quectel.SIM_PIN_ENV_VAR, "1234")
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].responses = [
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"OK\n",
+        ] + [b"+CPIN: SIM PIN\n\nOK\n"] * Quectel.SIM_UNLOCK_POLL_ATTEMPTS
+
+        with pytest.raises(SimStatusUnknownError):
+            modem.unlock_sim()
+
+        pin_sends = [w for w in fake_serials[0].written if w.startswith(b'AT+CPIN="')]
+        assert pin_sends == [b'AT+CPIN="1234"\r']
 
 
 class TestPowerDown:
