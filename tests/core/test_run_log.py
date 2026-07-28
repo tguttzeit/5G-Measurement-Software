@@ -199,6 +199,16 @@ class TestFinalize:
         assert not log_path.exists()
         assert list(tmp_path.glob("*.json")) == []
 
+    def test_ignores_a_blank_line_without_reporting_it_as_damage(self, tmp_path, caplog):
+        log_path = write_run_log(tmp_path, [1.0])
+        with open(log_path, "a") as f:
+            f.write("\n")
+
+        upload_path = finalize(log_path)
+
+        assert len(json.loads(upload_path.read_text())) == 1
+        assert "incomplete" not in caplog.text
+
     def test_discards_an_empty_log_without_writing_an_empty_upload_file(self, tmp_path):
         log_path = write_run_log(tmp_path, [])
 
