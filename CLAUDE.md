@@ -115,6 +115,14 @@ Issues in this repo are drafted by Claude Code. Any "Suggested approach" section
 Claude's own proposal, not an approach the maintainer has approved — it must be discussed and
 agreed with the maintainer before implementation work starts on it.
 
+## Decision records
+
+Non-obvious design decisions worked out with the maintainer while scoping an issue (trade-offs
+weighed, alternatives rejected and why) get written up in `docs/decisions/` — see that directory's
+README for format. This is separate from the issue itself: the issue tracks what needs doing, the
+decision record captures how/why a specific approach was chosen. Add one whenever a real trade-off
+was discussed and resolved, not for every issue.
+
 ## Autonomous work on `claude-ready` issues
 
 An issue labeled `claude-ready` has been explicitly approved by the maintainer to be picked up and
