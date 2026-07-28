@@ -71,6 +71,20 @@ class HeartbeatConfig:
     timeout_s: float = 10.0
 
 @dataclass
+class FanConfig:
+    """Case fan on/off control via GPIO, driven by CPU temperature with hysteresis.
+
+    Disabled by default. Two distinct thresholds avoid rapidly toggling the fan right at a
+    single boundary as temperature hovers around it.
+    """
+
+    enabled: bool = False
+    gpio_pin: int = 27
+    temp_on_celsius: float = 70.0
+    temp_off_celsius: float = 60.0
+    poll_interval_s: float = 5.0
+
+@dataclass
 class UploaderConfig:
     """Local storage and scp destination settings for uploading saved measurements."""
 
@@ -107,6 +121,7 @@ class AppConfig:
     collector: CollectorConfig
     run_status: RunStatusConfig
     heartbeat: HeartbeatConfig
+    fan: FanConfig
     uploader: UploaderConfig
     logging: LoggingConfig
     system: SystemConfig
@@ -121,6 +136,7 @@ def load_config(path: Path) -> AppConfig:
         collector=CollectorConfig(**raw.get("collector", {})),
         run_status=_build_run_status_config(raw.get("run_status", {})),
         heartbeat=HeartbeatConfig(**raw.get("heartbeat", {})),
+        fan=FanConfig(**raw.get("fan", {})),
         uploader=UploaderConfig(**raw["uploader"]),
         logging=LoggingConfig(**raw.get("logging", {})),
         system=SystemConfig(**raw.get("system", {})),

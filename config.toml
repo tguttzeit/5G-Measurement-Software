@@ -55,6 +55,15 @@ min_rsrp = -100.0
 min_rsrq = -11.0
 min_sinr = 0.0
 
+# Case fan on/off control via GPIO, based on CPU temperature with hysteresis. Disabled by
+# default. gpio_pin uses BCM numbering, same as system.shutdown_gpio.
+[fan]
+enabled = false
+gpio_pin = 27
+temp_on_celsius = 70.0
+temp_off_celsius = 60.0
+poll_interval_s = 5.0
+
 [uploader]
 upload_dir = "/home/admin/Logger/upload_queue"
 upload_user = "tim"

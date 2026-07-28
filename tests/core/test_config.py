@@ -41,6 +41,11 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.run_status.nr.min_sinr == 0.0
     assert config.run_status.empty_captures_until_pipeline_broken == 3
     assert config.heartbeat.enabled is False
+    assert config.fan.enabled is False
+    assert config.fan.gpio_pin == 27
+    assert config.fan.temp_on_celsius == 70.0
+    assert config.fan.temp_off_celsius == 60.0
+    assert config.fan.poll_interval_s == 5.0
     assert config.logging.level == "INFO"
     assert config.system.running_on_pi is True
     assert config.system.network_interfaces == ("wlan0", "wwan0")
@@ -83,6 +88,24 @@ interval_s = 30.0
     assert config.heartbeat.url == "https://backend.example.org/heartbeat"
     assert config.heartbeat.interval_s == 30.0
     assert config.heartbeat.timeout_s == 10.0
+
+
+def test_load_config_reads_fan_section(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[fan]
+enabled = true
+gpio_pin = 22
+temp_on_celsius = 75.0
+temp_off_celsius = 65.0
+poll_interval_s = 2.0
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.fan.enabled is True
+    assert config.fan.gpio_pin == 22
+    assert config.fan.temp_on_celsius == 75.0
+    assert config.fan.temp_off_celsius == 65.0
+    assert config.fan.poll_interval_s == 2.0
 
 
 def test_load_config_reads_per_rat_quality_thresholds(tmp_path):
