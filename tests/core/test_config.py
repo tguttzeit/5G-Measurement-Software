@@ -38,6 +38,7 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.run_status.lte.min_rsrp == -100.0
     assert config.run_status.nr.min_sinr == 0.0
     assert config.run_status.empty_captures_until_pipeline_broken == 3
+    assert config.heartbeat.enabled is False
     assert config.logging.level == "INFO"
     assert config.system.running_on_pi is True
     assert config.system.network_interfaces == ("wlan0", "wwan0")
@@ -61,6 +62,21 @@ running_on_pi = false
     assert config.collector.position_threshold == 5
     assert config.logging.level == "DEBUG"
     assert config.system.running_on_pi is False
+
+
+def test_load_config_reads_heartbeat_section(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[heartbeat]
+enabled = true
+url = "https://backend.example.org/heartbeat"
+interval_s = 30.0
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.heartbeat.enabled is True
+    assert config.heartbeat.url == "https://backend.example.org/heartbeat"
+    assert config.heartbeat.interval_s == 30.0
+    assert config.heartbeat.timeout_s == 10.0
 
 
 def test_load_config_reads_per_rat_quality_thresholds(tmp_path):

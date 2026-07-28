@@ -26,6 +26,14 @@ keep_alive_host = "8.8.8.8"
 keep_alive_port = 53
 keep_alive_interval_s = 4.0
 
+# Periodic run-status report to the backend server. Must be an https URL - see
+# docs/decisions/0007-remote-access-design.md.
+[heartbeat]
+enabled = false
+url = "https://add.your.backend.here/heartbeat"
+interval_s = 60.0
+timeout_s = 10.0
+
 # Quality cutoffs a measurement must clear on every metric to be counted as "good"
 # in the run status. Configured per RAT; see docs/decisions/0002-heartbeat-quality-thresholds.md.
 [run_status]

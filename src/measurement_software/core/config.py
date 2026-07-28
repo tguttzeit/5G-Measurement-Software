@@ -54,6 +54,19 @@ class RunStatusConfig:
     empty_captures_until_pipeline_broken: int = 3
 
 @dataclass
+class HeartbeatConfig:
+    """Backend heartbeat destination and cadence. Disabled unless a section says otherwise.
+
+    The URL has to be https: the backend's responses to this channel will carry remote
+    config overrides and commands (issue #8), so it needs to be authenticated transport.
+    """
+
+    enabled: bool = False
+    url: str = ""
+    interval_s: float = 60.0
+    timeout_s: float = 10.0
+
+@dataclass
 class UploaderConfig:
     """Local storage and scp destination settings for uploading saved measurements."""
 
@@ -89,6 +102,7 @@ class AppConfig:
     gnss_receiver: GnssConfig
     collector: CollectorConfig
     run_status: RunStatusConfig
+    heartbeat: HeartbeatConfig
     uploader: UploaderConfig
     logging: LoggingConfig
     system: SystemConfig
@@ -102,6 +116,7 @@ def load_config(path: Path) -> AppConfig:
         gnss_receiver=GnssConfig(**raw["gnss_receiver"]),
         collector=CollectorConfig(**raw.get("collector", {})),
         run_status=_build_run_status_config(raw.get("run_status", {})),
+        heartbeat=HeartbeatConfig(**raw.get("heartbeat", {})),
         uploader=UploaderConfig(**raw["uploader"]),
         logging=LoggingConfig(**raw.get("logging", {})),
         system=SystemConfig(**raw.get("system", {})),
