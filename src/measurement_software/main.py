@@ -5,6 +5,7 @@ from pathlib import Path
 
 from measurement_software.core.collector import Collector
 from measurement_software.core.config import load_config, AppConfig
+from measurement_software.core.fan_controller import FanController
 from measurement_software.core.heartbeat_sender import HeartbeatSender
 from measurement_software.core.logging_setup import setup_logging
 from measurement_software.core.run_status import RunStatusTracker
@@ -30,26 +31,32 @@ def main() -> AppConfig:
     if config.system.running_on_pi:
         setup_gpio(config.system.shutdown_gpio)
 
-    modem = create_modem(config.modem)
-    gnss_receiver = (
-        create_gnss_receiver(config.gnss_receiver)
-        if config.collector.gps_enabled
-        else NullGNSSReceiver()
-    )
-    run_status = RunStatusTracker(config.run_status)
-    heartbeat = HeartbeatSender(config.heartbeat, run_status)
-    collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat)
-    uploader = Uploader(config.uploader)
+    fan_controller = FanController(config.fan)
+    fan_controller.start()
 
-    uploader.upload_pending_files()
-    log_ip_addrs(config.system.network_interfaces)
+    try:
+        modem = create_modem(config.modem)
+        gnss_receiver = (
+            create_gnss_receiver(config.gnss_receiver)
+            if config.collector.gps_enabled
+            else NullGNSSReceiver()
+        )
+        run_status = RunStatusTracker(config.run_status)
+        heartbeat = HeartbeatSender(config.heartbeat, run_status)
+        collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat)
+        uploader = Uploader(config.uploader)
 
-    datapoints = collector.collect()
-    uploader.save_datapoints(datapoints)
-    uploader.upload_pending_files()
+        uploader.upload_pending_files()
+        log_ip_addrs(config.system.network_interfaces)
 
-    if config.system.running_on_pi:
-        signal_completion(config.system.shutdown_gpio)
+        datapoints = collector.collect()
+        uploader.save_datapoints(datapoints)
+        uploader.upload_pending_files()
+
+        if config.system.running_on_pi:
+            signal_completion(config.system.shutdown_gpio)
+    finally:
+        fan_controller.stop()
 
     return config
 
