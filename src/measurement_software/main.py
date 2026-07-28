@@ -7,8 +7,11 @@ from measurement_software.core.collector import Collector
 from measurement_software.core.config import load_config, AppConfig
 from measurement_software.core.heartbeat_sender import HeartbeatSender
 from measurement_software.core.logging_setup import setup_logging
+from measurement_software.core.run_phase import RunPhase
 from measurement_software.core.run_status import RunStatusTracker
+from measurement_software.core.status_display_updater import StatusDisplayUpdater
 from measurement_software.core.uploader import Uploader
+from measurement_software.displays import create_display
 from measurement_software.gnss import create_gnss_receiver
 from measurement_software.gnss.null_gnss_receiver import NullGNSSReceiver
 from measurement_software.modems import create_modem
@@ -41,15 +44,30 @@ def main() -> AppConfig:
     collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat)
     uploader = Uploader(config.uploader)
 
-    uploader.upload_pending_files()
-    log_ip_addrs(config.system.network_interfaces)
+    display = create_display(config.display)
+    run_phase = RunPhase()
+    status_display = StatusDisplayUpdater(display, run_phase, run_status, config.collector, config.display)
 
-    datapoints = collector.collect()
-    uploader.save_datapoints(datapoints)
-    uploader.upload_pending_files()
+    display.open()
+    status_display.start()
+    try:
+        run_phase.set("uploading pending data")
+        uploader.upload_pending_files()
+        log_ip_addrs(config.system.network_interfaces)
 
-    if config.system.running_on_pi:
-        signal_completion(config.system.shutdown_gpio)
+        run_phase.set("collecting")
+        datapoints = collector.collect()
+
+        run_phase.set("saving and uploading")
+        uploader.save_datapoints(datapoints)
+        uploader.upload_pending_files()
+
+        run_phase.set("done")
+        if config.system.running_on_pi:
+            signal_completion(config.system.shutdown_gpio)
+    finally:
+        status_display.stop()
+        display.close()
 
     return config
 
