@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from measurement_software.core.atomic_file import write_json_atomically
 from measurement_software.core.datapoint import Datapoint
-from measurement_software.core.run_log import RUN_FILE_PREFIX, RUN_LOG_SUFFIX, RunLog
+from measurement_software.core.run_log import RUN_FILE_PREFIX, RUN_LOG_SUFFIX, RunLog, finalize
 from measurement_software.gnss.gnss_receiver import GNSSFix, Position
 from measurement_software.modems.modem import CellSample
 
@@ -132,3 +133,111 @@ class TestDurability:
         assert [json.loads(line)["fix"]["position"]["latitude"] for line in lines[:2]] == [1.0, 2.0]
         with pytest.raises(json.JSONDecodeError):
             json.loads(lines[2])
+
+
+def write_run_log(directory: Path, latitudes: list[float], trailing_partial: bool = False) -> Path:
+    """Writes a run log as RunLog would have left it, optionally cut short mid-line by a power loss."""
+    log = RunLog(directory)
+    log.open()
+    for latitude in latitudes:
+        log.append([make_datapoint(latitude=latitude)])
+    log.close()
+    if trailing_partial:
+        with open(log.path, "a") as f:
+            f.write('{"timestamp": "2026-07-27T00:00:00Z", "fix": {"position": {"lat')
+    return log.path
+
+
+class TestFinalize:
+    def test_converts_the_log_into_a_json_array_file(self, tmp_path):
+        log_path = write_run_log(tmp_path, [1.0, 2.0])
+
+        upload_path = finalize(log_path)
+
+        assert upload_path == log_path.with_suffix(".json")
+        content = json.loads(upload_path.read_text())
+        assert [dp["fix"]["position"]["latitude"] for dp in content] == [1.0, 2.0]
+        assert content[0]["cell_sample"]["rat"] == "LTE"
+
+    def test_removes_the_run_log_once_the_converted_file_exists(self, tmp_path):
+        log_path = write_run_log(tmp_path, [1.0])
+
+        finalize(log_path)
+
+        assert not log_path.exists()
+
+    def test_converted_file_is_the_only_thing_left_for_the_uploader(self, tmp_path):
+        log_path = write_run_log(tmp_path, [1.0])
+
+        finalize(log_path)
+
+        assert [p.name for p in tmp_path.iterdir()] == [log_path.with_suffix(".json").name]
+
+    def test_keeps_every_complete_line_when_the_last_one_was_cut_short(self, tmp_path):
+        log_path = write_run_log(tmp_path, [1.0, 2.0], trailing_partial=True)
+
+        upload_path = finalize(log_path)
+
+        content = json.loads(upload_path.read_text())
+        assert [dp["fix"]["position"]["latitude"] for dp in content] == [1.0, 2.0]
+
+    def test_discards_a_log_holding_nothing_but_a_partial_line(self, tmp_path):
+        log_path = write_run_log(tmp_path, [], trailing_partial=True)
+
+        assert finalize(log_path) is None
+        assert not log_path.exists()
+        assert list(tmp_path.glob("*.json")) == []
+
+    def test_discards_an_empty_log_without_writing_an_empty_upload_file(self, tmp_path):
+        log_path = write_run_log(tmp_path, [])
+
+        assert finalize(log_path) is None
+        assert not log_path.exists()
+        assert list(tmp_path.glob("*.json")) == []
+
+
+class TestFinalizeInterrupted:
+    def test_leaves_no_upload_file_when_the_conversion_is_cut_short(self, tmp_path, monkeypatch):
+        log_path = write_run_log(tmp_path, [1.0, 2.0])
+
+        def die_midway(payload, f, **kwargs):
+            f.write('[{"timestamp": "2026-07')
+            raise OSError("power lost mid-write")
+
+        monkeypatch.setattr("measurement_software.core.atomic_file.json.dump", die_midway)
+
+        with pytest.raises(OSError, match="power lost mid-write"):
+            finalize(log_path)
+
+        assert list(tmp_path.glob("*.json")) == []
+
+    def test_the_run_survives_an_interrupted_conversion_and_finalizes_on_the_next_try(self, tmp_path, monkeypatch):
+        log_path = write_run_log(tmp_path, [1.0, 2.0])
+
+        def die_before_rename(source, destination):
+            raise OSError("power lost mid-rename")
+
+        monkeypatch.setattr("measurement_software.core.atomic_file.os.replace", die_before_rename)
+        with pytest.raises(OSError, match="power lost mid-rename"):
+            finalize(log_path)
+
+        assert log_path.exists()
+        monkeypatch.undo()
+
+        upload_path = finalize(log_path)
+
+        content = json.loads(upload_path.read_text())
+        assert [dp["fix"]["position"]["latitude"] for dp in content] == [1.0, 2.0]
+
+    def test_finalizing_again_after_a_cut_between_rename_and_cleanup_is_harmless(self, tmp_path):
+        # A power cut can land after the upload file is in place but before the run log
+        # is removed, so the next run finds both and must simply redo the conversion.
+        log_path = write_run_log(tmp_path, [1.0, 2.0])
+        upload_path = log_path.with_suffix(".json")
+        write_json_atomically(upload_path, [{"stale": True}])
+
+        assert finalize(log_path) == upload_path
+
+        content = json.loads(upload_path.read_text())
+        assert [dp["fix"]["position"]["latitude"] for dp in content] == [1.0, 2.0]
+        assert not log_path.exists()

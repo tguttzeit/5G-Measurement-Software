@@ -5,11 +5,12 @@ from datetime import datetime, UTC
 from pathlib import Path
 from typing import TextIO
 
-from measurement_software.core.atomic_file import flush_to_disk, fsync_directory
+from measurement_software.core.atomic_file import flush_to_disk, fsync_directory, write_json_atomically
 from measurement_software.core.datapoint import Datapoint
 
 RUN_FILE_PREFIX = "gps_5g_"
 RUN_LOG_SUFFIX = ".jsonl"
+UPLOAD_SUFFIX = ".json"
 
 logger = logging.getLogger(__name__)
 
@@ -58,3 +59,36 @@ class RunLog:
         if self._file is not None:
             self._file.close()
             self._file = None
+
+
+def finalize(path: Path) -> Path | None:
+    """Converts a run log into the uploadable JSON array file, returning that file's path.
+
+    The run log is only removed once the converted file is in place, so an interruption
+    at any point here leaves the run recoverable from the log it came from.
+    """
+    datapoints = _read_intact_datapoints(path)
+    if not datapoints:
+        logger.info("Run log %s holds no usable datapoints - discarding it.", path.name)
+        path.unlink()
+        return None
+
+    upload_path = path.with_suffix(UPLOAD_SUFFIX)
+    write_json_atomically(upload_path, datapoints)
+    path.unlink()
+
+    logger.info("%d datapoints finalized into %s", len(datapoints), upload_path.name)
+    return upload_path
+
+
+def _read_intact_datapoints(path: Path) -> list[dict]:
+    """Parses every complete line of a run log, skipping any line an interrupted append left partial."""
+    datapoints = []
+    for number, line in enumerate(path.read_text().splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            datapoints.append(json.loads(line))
+        except json.JSONDecodeError:
+            logger.warning("Skipping incomplete line %d of %s - lost to an interrupted write.", number, path.name)
+    return datapoints
