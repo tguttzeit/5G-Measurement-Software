@@ -44,6 +44,41 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.logging.level == "INFO"
     assert config.system.running_on_pi is True
     assert config.system.network_interfaces == ("wlan0", "wwan0")
+    assert config.modem.retries == 3
+    assert config.modem.retry_delay_s == 0.75
+    assert config.gnss_receiver.retries == 3
+    assert config.gnss_receiver.retry_delay_s == 0.75
+
+
+def test_load_config_overrides_serial_retry_settings(tmp_path):
+    content = """
+[modem]
+type = "quectel"
+port = "/dev/ttyUSB2"
+baud_rate = 115200
+timeout = 1.0
+retries = 5
+retry_delay_s = 1.0
+
+[gnss_receiver]
+type = "quectel"
+port = "/dev/ttyUSB3"
+baud_rate = 9600
+timeout = 1.0
+retries = 1
+retry_delay_s = 0.5
+
+[uploader]
+upload_dir = "/data/uploads"
+upload_user = "pi"
+upload_host = "example.org"
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.modem.retries == 5
+    assert config.modem.retry_delay_s == 1.0
+    assert config.gnss_receiver.retries == 1
+    assert config.gnss_receiver.retry_delay_s == 0.5
 
 
 def test_load_config_overrides_defaults_when_optional_sections_present(tmp_path):

@@ -11,6 +11,8 @@ class ModemConfig:
     baud_rate: int
     timeout: float
     mode: str = "serving_cell"
+    retries: int = 3
+    retry_delay_s: float = 0.75
 
 @dataclass
 class GnssConfig:
@@ -20,6 +22,8 @@ class GnssConfig:
     port: str
     baud_rate: int
     timeout: float
+    retries: int = 3
+    retry_delay_s: float = 0.75
 
 @dataclass
 class CollectorConfig:
