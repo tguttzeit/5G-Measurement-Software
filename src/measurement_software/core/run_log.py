@@ -81,6 +81,24 @@ def finalize(path: Path) -> Path | None:
     return upload_path
 
 
+def recover_unfinalized(directory: Path) -> list[Path]:
+    """Finalizes run logs a previous run left behind, returning the upload files recovered from them.
+
+    Must run before the current run opens its own log, so that a live log is never
+    mistaken for an abandoned one.
+    """
+    if not directory.is_dir():
+        return []
+
+    recovered = []
+    for path in sorted(directory.glob(f"*{RUN_LOG_SUFFIX}")):
+        logger.warning("Run log %s was never finalized - recovering it.", path.name)
+        upload_path = finalize(path)
+        if upload_path is not None:
+            recovered.append(upload_path)
+    return recovered
+
+
 def _read_intact_datapoints(path: Path) -> list[dict]:
     """Parses every complete line of a run log, skipping any line an interrupted append left partial."""
     datapoints = []

@@ -6,7 +6,13 @@ import pytest
 
 from measurement_software.core.atomic_file import write_json_atomically
 from measurement_software.core.datapoint import Datapoint
-from measurement_software.core.run_log import RUN_FILE_PREFIX, RUN_LOG_SUFFIX, RunLog, finalize
+from measurement_software.core.run_log import (
+    RUN_FILE_PREFIX,
+    RUN_LOG_SUFFIX,
+    RunLog,
+    finalize,
+    recover_unfinalized,
+)
 from measurement_software.gnss.gnss_receiver import GNSSFix, Position
 from measurement_software.modems.modem import CellSample
 
@@ -135,17 +141,21 @@ class TestDurability:
             json.loads(lines[2])
 
 
-def write_run_log(directory: Path, latitudes: list[float], trailing_partial: bool = False) -> Path:
+def write_run_log(
+    directory: Path, latitudes: list[float], trailing_partial: bool = False, name: str | None = None
+) -> Path:
     """Writes a run log as RunLog would have left it, optionally cut short mid-line by a power loss."""
     log = RunLog(directory)
     log.open()
     for latitude in latitudes:
         log.append([make_datapoint(latitude=latitude)])
     log.close()
+
+    path = log.path if name is None else log.path.rename(directory / name)
     if trailing_partial:
-        with open(log.path, "a") as f:
+        with open(path, "a") as f:
             f.write('{"timestamp": "2026-07-27T00:00:00Z", "fix": {"position": {"lat')
-    return log.path
+    return path
 
 
 class TestFinalize:
@@ -240,4 +250,43 @@ class TestFinalizeInterrupted:
 
         content = json.loads(upload_path.read_text())
         assert [dp["fix"]["position"]["latitude"] for dp in content] == [1.0, 2.0]
+        assert not log_path.exists()
+
+
+class TestRecoverUnfinalized:
+    def test_finalizes_a_log_left_behind_by_a_run_that_never_finished(self, tmp_path):
+        log_path = write_run_log(tmp_path, [1.0, 2.0], trailing_partial=True)
+
+        [upload_path] = recover_unfinalized(tmp_path)
+
+        content = json.loads(upload_path.read_text())
+        assert [dp["fix"]["position"]["latitude"] for dp in content] == [1.0, 2.0]
+        assert not log_path.exists()
+
+    def test_recovers_every_leftover_log_in_chronological_order(self, tmp_path):
+        write_run_log(tmp_path, [2.0], name=f"{RUN_FILE_PREFIX}20260102_000000{RUN_LOG_SUFFIX}")
+        write_run_log(tmp_path, [1.0], name=f"{RUN_FILE_PREFIX}20260101_000000{RUN_LOG_SUFFIX}")
+
+        recovered = recover_unfinalized(tmp_path)
+
+        assert [p.name for p in recovered] == [
+            f"{RUN_FILE_PREFIX}20260101_000000.json",
+            f"{RUN_FILE_PREFIX}20260102_000000.json",
+        ]
+        assert list(tmp_path.glob(f"*{RUN_LOG_SUFFIX}")) == []
+
+    def test_reports_nothing_when_the_previous_run_finalized_cleanly(self, tmp_path):
+        already_uploaded = tmp_path / f"{RUN_FILE_PREFIX}20260101_000000.json"
+        write_json_atomically(already_uploaded, [{"rat": "LTE"}])
+
+        assert recover_unfinalized(tmp_path) == []
+        assert already_uploaded.exists()
+
+    def test_reports_nothing_when_the_upload_directory_does_not_exist_yet(self, tmp_path):
+        assert recover_unfinalized(tmp_path / "missing") == []
+
+    def test_a_log_holding_only_a_partial_line_is_discarded_rather_than_recovered(self, tmp_path):
+        log_path = write_run_log(tmp_path, [], trailing_partial=True)
+
+        assert recover_unfinalized(tmp_path) == []
         assert not log_path.exists()
