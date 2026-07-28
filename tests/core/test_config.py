@@ -41,6 +41,11 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.run_status.nr.min_sinr == 0.0
     assert config.run_status.empty_captures_until_pipeline_broken == 3
     assert config.heartbeat.enabled is False
+    assert config.display.enabled is False
+    assert config.display.type == "ssd1306"
+    assert config.display.i2c_port == 1
+    assert config.display.i2c_address == 0x3C
+    assert config.display.refresh_interval_s == 2.0
     assert config.logging.level == "INFO"
     assert config.system.running_on_pi is True
     assert config.system.network_interfaces == ("wlan0", "wwan0")
@@ -83,6 +88,23 @@ interval_s = 30.0
     assert config.heartbeat.url == "https://backend.example.org/heartbeat"
     assert config.heartbeat.interval_s == 30.0
     assert config.heartbeat.timeout_s == 10.0
+
+
+def test_load_config_reads_display_section(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[display]
+enabled = true
+i2c_port = 3
+i2c_address = 0x3D
+refresh_interval_s = 5.0
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.display.enabled is True
+    assert config.display.type == "ssd1306"
+    assert config.display.i2c_port == 3
+    assert config.display.i2c_address == 0x3D
+    assert config.display.refresh_interval_s == 5.0
 
 
 def test_load_config_reads_per_rat_quality_thresholds(tmp_path):
