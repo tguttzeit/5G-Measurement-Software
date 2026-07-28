@@ -6,6 +6,7 @@ from math import radians, sin, cos, asin, sqrt
 from typing import Iterator
 
 from measurement_software.core.config import CollectorConfig
+from measurement_software.core.heartbeat_sender import HeartbeatSender
 from measurement_software.core.keep_modem_alive_sender import KeepModemAliveSender
 from measurement_software.core.run_status import RunStatusTracker
 from measurement_software.gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
@@ -25,11 +26,12 @@ class Collector:
     """Runs a GPS-triggered measurement session, sampling the modem whenever the device moves."""
 
     def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig,
-                 run_status: RunStatusTracker):
+                 run_status: RunStatusTracker, heartbeat: HeartbeatSender):
         self._logger = logging.getLogger(__name__)
         self._modem = modem
         self._gnss_receiver = gnss_receiver
         self._run_status = run_status
+        self._heartbeat = heartbeat
 
         self._position_threshold = config.position_threshold
         self._max_idle_time = config.max_idle_time
@@ -50,6 +52,7 @@ class Collector:
         time.sleep(1)
 
         self._keep_modem_alive.start()
+        self._heartbeat.start()
         self._logger.info("Starting data collection...")
 
         try:
@@ -69,6 +72,7 @@ class Collector:
                     break
 
         finally:
+            self._heartbeat.stop()
             self._keep_modem_alive.stop()
             self._gnss_receiver.close()
             self._modem.close()
