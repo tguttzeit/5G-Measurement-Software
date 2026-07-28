@@ -3,7 +3,7 @@ import logging
 import pytest
 
 from measurement_software.core.config import ModemConfig
-from measurement_software.modems.quectel import Quectel
+from measurement_software.modems.quectel import Quectel, SimStatus
 
 
 def make_config(**overrides) -> ModemConfig:
@@ -13,12 +13,17 @@ def make_config(**overrides) -> ModemConfig:
 
 
 class FakeSerial:
-    """Fakes pyserial's Serial, recording writes and returning a scripted response."""
+    """Fakes pyserial's Serial, recording writes and returning scripted responses.
+
+    `response` is returned for every read_all() call. For interactions with more than one
+    write/read round trip, set `responses` instead - each read_all() pops the next entry.
+    """
 
     def __init__(self, *args, response: bytes = b"", **kwargs):
         self.args = args
         self.kwargs = kwargs
         self.response = response
+        self.responses: list[bytes] = []
         self.written: list[bytes] = []
         self.closed = False
 
@@ -26,6 +31,8 @@ class FakeSerial:
         self.written.append(data)
 
     def read_all(self) -> bytes:
+        if self.responses:
+            return self.responses.pop(0)
         return self.response
 
     def close(self) -> None:
@@ -303,6 +310,35 @@ class TestQueryCellInfo:
 
         assert fake_serials[0].written == [b"AT+QSCAN=1,1\r"]
         assert [s.rat for s in samples] == ["NR5G-SA"]
+
+
+class TestParseCpinResponse:
+    def test_ready(self):
+        assert Quectel._parse_cpin_response("+CPIN: READY\n\nOK\n") == SimStatus.READY
+
+    def test_sim_pin_locked(self):
+        assert Quectel._parse_cpin_response("+CPIN: SIM PIN\n\nOK\n") == SimStatus.SIM_PIN
+
+    def test_sim_puk_locked(self):
+        assert Quectel._parse_cpin_response("+CPIN: SIM PUK\n\nOK\n") == SimStatus.SIM_PUK
+
+    def test_unrecognized_response_is_unknown(self):
+        assert Quectel._parse_cpin_response("garbled\n") == SimStatus.UNKNOWN
+
+    def test_empty_response_is_unknown(self):
+        assert Quectel._parse_cpin_response("") == SimStatus.UNKNOWN
+
+
+class TestQuerySimStatus:
+    def test_sends_cpin_query_and_parses_response(self, fake_serials):
+        modem = Quectel(make_config())
+        modem.open()
+        fake_serials[0].response = b"+CPIN: READY\n\nOK\n"
+
+        status = modem._query_sim_status()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r"]
+        assert status == SimStatus.READY
 
 
 class TestPowerDown:

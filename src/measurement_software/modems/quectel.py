@@ -12,6 +12,14 @@ class QuectelMode(StrEnum):
     SERVING_CELL = "serving_cell"
     SA_SCAN = "sa_scan"
 
+class SimStatus(StrEnum):
+    """The SIM lock state as reported by AT+CPIN?."""
+
+    READY = "ready"
+    SIM_PIN = "sim_pin"
+    SIM_PUK = "sim_puk"
+    UNKNOWN = "unknown"
+
 class Quectel(Modem):
     """Modem implementation for Quectel modules, driven over a serial AT command interface."""
 
@@ -40,6 +48,22 @@ class Quectel(Modem):
     def power_down(self) -> None:
         self._connection.write(b'AT+QPOWD=1\r')
         time.sleep(5)
+
+    def _query_sim_status(self) -> SimStatus:
+        self._connection.write(b'AT+CPIN?\r')
+        time.sleep(0.5)
+        resp = self._connection.read_all().decode(errors="ignore")
+        return self._parse_cpin_response(resp)
+
+    @staticmethod
+    def _parse_cpin_response(response: str) -> SimStatus:
+        if "READY" in response:
+            return SimStatus.READY
+        if "PUK" in response:
+            return SimStatus.SIM_PUK
+        if "SIM PIN" in response:
+            return SimStatus.SIM_PIN
+        return SimStatus.UNKNOWN
 
     @property
     def _connection(self) -> serial.Serial:
