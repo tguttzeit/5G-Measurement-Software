@@ -1,4 +1,4 @@
-# 0012 — Power-loss durability: the choices ADR 0003 left open
+# 0016 — Power-loss durability: the choices ADR 0003 left open
 
 ## Context
 
