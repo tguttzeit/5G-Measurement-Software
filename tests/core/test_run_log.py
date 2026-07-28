@@ -4,12 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from measurement_software.core.atomic_file import write_json_atomically
+from measurement_software.core.atomic_file import TEMP_SUFFIX, write_json_atomically
 from measurement_software.core.datapoint import Datapoint
 from measurement_software.core.run_log import (
     RUN_FILE_PREFIX,
     RUN_LOG_SUFFIX,
     RunLog,
+    discard_stale_temp_files,
     finalize,
     recover_unfinalized,
 )
@@ -290,3 +291,26 @@ class TestRecoverUnfinalized:
 
         assert recover_unfinalized(tmp_path) == []
         assert not log_path.exists()
+
+
+class TestDiscardStaleTempFiles:
+    def test_removes_a_temp_file_an_interrupted_finalization_left_behind(self, tmp_path):
+        stale = tmp_path / f"{RUN_FILE_PREFIX}20260101_000000.json{TEMP_SUFFIX}"
+        stale.write_text('[{"timestamp": "2026-07')
+
+        discard_stale_temp_files(tmp_path)
+
+        assert not stale.exists()
+
+    def test_leaves_run_logs_and_finished_upload_files_alone(self, tmp_path):
+        log_path = write_run_log(tmp_path, [1.0], name=f"{RUN_FILE_PREFIX}20260101_000000{RUN_LOG_SUFFIX}")
+        upload_path = tmp_path / f"{RUN_FILE_PREFIX}20260102_000000.json"
+        write_json_atomically(upload_path, [{"rat": "LTE"}])
+
+        discard_stale_temp_files(tmp_path)
+
+        assert log_path.exists()
+        assert upload_path.exists()
+
+    def test_does_nothing_when_the_upload_directory_does_not_exist_yet(self, tmp_path):
+        discard_stale_temp_files(tmp_path / "missing")

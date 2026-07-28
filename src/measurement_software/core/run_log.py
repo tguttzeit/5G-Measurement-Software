@@ -5,7 +5,12 @@ from datetime import datetime, UTC
 from pathlib import Path
 from typing import TextIO
 
-from measurement_software.core.atomic_file import flush_to_disk, fsync_directory, write_json_atomically
+from measurement_software.core.atomic_file import (
+    TEMP_SUFFIX,
+    flush_to_disk,
+    fsync_directory,
+    write_json_atomically,
+)
 from measurement_software.core.datapoint import Datapoint
 
 RUN_FILE_PREFIX = "gps_5g_"
@@ -97,6 +102,24 @@ def recover_unfinalized(directory: Path) -> list[Path]:
         if upload_path is not None:
             recovered.append(upload_path)
     return recovered
+
+
+def discard_stale_temp_files(directory: Path) -> None:
+    """Removes half-written temp files an interrupted finalization left behind.
+
+    Nothing is lost with them: the run log they were being converted from is still the
+    record, and recovery converts it again from scratch.
+    """
+    if not directory.is_dir():
+        return
+
+    stale_paths = sorted(directory.glob(f"*{TEMP_SUFFIX}"))
+    for path in stale_paths:
+        logger.warning("Discarding %s - left over from an interrupted write.", path.name)
+        path.unlink()
+
+    if stale_paths:
+        fsync_directory(directory)
 
 
 def _read_intact_datapoints(path: Path) -> list[dict]:
