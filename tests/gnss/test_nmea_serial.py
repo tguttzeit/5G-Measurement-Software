@@ -1,6 +1,7 @@
 import logging
 
 import pytest
+import serial
 
 from measurement_software.core.config import GnssConfig
 from measurement_software.gnss.gnss_receiver import GNSSFix, Position
@@ -35,14 +36,24 @@ def make_config(**overrides) -> GnssConfig:
 
 
 class FakeSerial:
+    """`readline_sequence`, if set, scripts successive `readline()` calls (an entry that is an
+    Exception is raised instead of returned) — otherwise every call just returns `line`.
+    """
+
     def __init__(self, *args, line: bytes = b"", **kwargs):
         self.args = args
         self.kwargs = kwargs
         self.line = line
+        self.readline_sequence: list[bytes | Exception] | None = None
         self.reset_called = False
         self.closed = False
 
     def readline(self) -> bytes:
+        if self.readline_sequence is not None:
+            item = self.readline_sequence.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
         return self.line
 
     def reset_input_buffer(self) -> None:
@@ -50,6 +61,11 @@ class FakeSerial:
 
     def close(self) -> None:
         self.closed = True
+
+
+@pytest.fixture(autouse=True)
+def no_sleep(monkeypatch):
+    monkeypatch.setattr("measurement_software.core.serial_retry.time.sleep", lambda seconds: None)
 
 
 @pytest.fixture
@@ -154,3 +170,48 @@ class TestReadFix:
         gnss.read_fix()
 
         assert "Low satellite count" not in caplog.text
+
+
+class TestReadFixRetry:
+    def test_recovers_from_a_transient_empty_read(self, fake_serials):
+        gnss = NMEASerial(make_config(retries=3))
+        gnss.open()
+        fake_serials[0].readline_sequence = [b"", gga_sentence().encode()]
+
+        fix = gnss.read_fix()
+
+        assert fix is not None
+        assert fix.num_satellites == 8
+
+    def test_recovers_from_a_transient_timeout_exception(self, fake_serials):
+        gnss = NMEASerial(make_config(retries=3))
+        gnss.open()
+        fake_serials[0].readline_sequence = [
+            serial.SerialTimeoutException("write timed out"),
+            gga_sentence().encode(),
+        ]
+
+        fix = gnss.read_fix()
+
+        assert fix is not None
+
+    def test_device_gone_propagates_immediately_without_exhausting_retries(self, fake_serials):
+        gnss = NMEASerial(make_config(retries=3))
+        gnss.open()
+        fake_serials[0].readline_sequence = [serial.SerialException("device disconnected")]
+
+        with pytest.raises(serial.SerialException):
+            gnss.read_fix()
+
+    def test_a_non_gga_line_is_not_retried(self, fake_serials):
+        """A line that just isn't GGA is a normal NMEA stream condition, not a transient failure."""
+        gnss = NMEASerial(make_config(retries=3))
+        gnss.open()
+        fake_serials[0].readline_sequence = [
+            b"$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A"
+        ]
+
+        fix = gnss.read_fix()
+
+        assert fix is None
+        assert fake_serials[0].readline_sequence == []
