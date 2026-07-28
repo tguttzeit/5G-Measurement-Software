@@ -7,6 +7,7 @@ from typing import Iterator
 
 from measurement_software.core.config import CollectorConfig
 from measurement_software.core.keep_modem_alive_sender import KeepModemAliveSender
+from measurement_software.core.run_status import RunStatusTracker
 from measurement_software.gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
 from measurement_software.modems.modem import Modem, CellSample
 
@@ -23,10 +24,12 @@ class Datapoint:
 class Collector:
     """Runs a GPS-triggered measurement session, sampling the modem whenever the device moves."""
 
-    def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig):
+    def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig,
+                 run_status: RunStatusTracker):
         self._logger = logging.getLogger(__name__)
         self._modem = modem
         self._gnss_receiver = gnss_receiver
+        self._run_status = run_status
 
         self._position_threshold = config.position_threshold
         self._max_idle_time = config.max_idle_time
@@ -134,10 +137,11 @@ class Collector:
     def _capture_datapoints(self, fix: GNSSFix) -> list[Datapoint]:
         """Queries the modem and pairs each cell sample with the given fix and current timestamp."""
         timestamp = f"{datetime.now(UTC).isoformat()}Z"
-        datapoints: list[Datapoint] = []
-        for modem_data in self._modem.query_cell_info():
-            datapoint = Datapoint(timestamp=timestamp, fix=fix, cell_sample=modem_data)
-            datapoints.append(datapoint)
+        samples = self._modem.query_cell_info()
+        self._run_status.record_capture(samples)
+
+        datapoints = [Datapoint(timestamp=timestamp, fix=fix, cell_sample=sample) for sample in samples]
+        for datapoint in datapoints:
             self._logger.debug("Datapoint captured: %s", datapoint)
         return datapoints
 
