@@ -39,8 +39,9 @@ class CollectorConfig:
 class QualityThresholds:
     """Cutoffs a cell measurement has to clear on every metric to count as good.
 
-    Starting values are the reference cutoffs from decision record 0002, expected to be
-    retuned per RAT once real field data exists.
+    The defaults are commonly-cited reference values of the kind drive-test tools use as
+    their default tiers. They have not been validated against this project's own
+    measurements, and are meant to be retuned per RAT once field data exists.
     """
 
     min_rsrp: float = -100.0
@@ -59,8 +60,9 @@ class RunStatusConfig:
 class HeartbeatConfig:
     """Backend heartbeat destination and cadence. Disabled unless a section says otherwise.
 
-    The URL has to be https: the backend's responses to this channel will carry remote
-    config overrides and commands (issue #8), so it needs to be authenticated transport.
+    The URL has to be https. The device initiates every contact and the backend answers,
+    which makes the response a path for instructions to reach the device — so the transport
+    has to be one where the device can trust who it is talking to.
     """
 
     enabled: bool = False

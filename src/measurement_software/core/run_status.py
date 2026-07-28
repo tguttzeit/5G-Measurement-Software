@@ -7,7 +7,19 @@ from measurement_software.modems.modem import CellSample
 
 
 class SampleQuality(StrEnum):
-    """How a single cell measurement was classified on-device."""
+    """How a single cell measurement was classified, by two checks asked in order.
+
+    First: is the reading physically possible at all? RSRP, RSRQ and SINR each have a range
+    the radio standard allows them to be reported in. If any one of them is missing or sits
+    outside that range, the modem handed us a null/sentinel/garbage value, and the sample is
+    INVALID — no judgement about signal strength has been made yet.
+
+    Second, for a reading that is possible: is it actually good enough to be useful? Every
+    one of the three has to clear its configured cutoff for the sample to be GOOD. If even
+    one falls short while the others are fine, the sample is BAD — weak signal, a congested
+    cell and a noisy link each make a measurement unhelpful on their own, so two good metrics
+    do not outvote one poor one.
+    """
 
     GOOD = "good"
     BAD = "bad"
@@ -33,7 +45,13 @@ NR_LEGAL_RANGES = LegalRanges(rsrp=(-156.0, -31.0), rsrq=(-43.0, 20.0), sinr=(-2
 
 @dataclass(frozen=True)
 class RunStatus:
-    """How a run is doing so far: how good its data is, and whether it is producing any at all."""
+    """How a run is doing so far: how good its data is, and whether it is producing any at all.
+
+    `good`, `bad` and `invalid` count measurements by their SampleQuality (see there for what
+    each means) and always add up to `datapoints_total`. `pipeline_broken` is a separate signal
+    and says nothing about quality: it means measurements are not arriving even though the
+    device is moving, which is a fault to go fix rather than a poor reading to record.
+    """
 
     datapoints_total: int
     good: int
@@ -42,7 +60,11 @@ class RunStatus:
     pipeline_broken: bool
 
     def as_payload(self) -> dict:
-        """Renders the status as the heartbeat body defined in decision record 0001."""
+        """Renders the status as the JSON body the backend receives.
+
+        The counts are nested under a name saying what they cover, because they are totals
+        for the whole run so far rather than for the interval since the last heartbeat.
+        """
         return {
             "since_run_start": {
                 "datapoints_total": self.datapoints_total,
@@ -87,7 +109,11 @@ class RunStatusTracker:
             )
 
     def _is_pipeline_broken(self) -> bool:
-        """True once the device has moved repeatedly without the modem yielding anything."""
+        """True once enough consecutive captures came back empty while the device kept moving.
+
+        One empty modem response is ordinary noise; a streak of them means the vehicle is
+        covering ground while nothing is being measured.
+        """
         return self._consecutive_empty_captures >= self._config.empty_captures_until_pipeline_broken
 
 
