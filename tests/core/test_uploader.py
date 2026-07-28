@@ -72,7 +72,13 @@ def make_config(tmp_path: Path, **overrides) -> UploaderConfig:
 
 def make_datapoint() -> Datapoint:
     fix = GNSSFix(position=Position(latitude=1.0, longitude=2.0, altitude=3.0), num_satellites=7)
-    return Datapoint(timestamp="2026-07-27T00:00:00Z", fix=fix, cell_sample=CellSample(rat="LTE"))
+    return Datapoint(
+        timestamp="2026-07-27T00:00:00Z",
+        device_id="test-device",
+        mission_type="ground",
+        fix=fix,
+        cell_sample=CellSample(rat="LTE"),
+    )
 
 
 @pytest.fixture
@@ -114,6 +120,8 @@ class TestSaveDatapoints:
         content = json.loads(files[0].read_text())
         assert len(content) == 1
         assert content[0]["timestamp"] == dp.timestamp
+        assert content[0]["device_id"] == "test-device"
+        assert content[0]["mission_type"] == "ground"
         assert content[0]["cell_sample"]["rat"] == "LTE"
         assert content[0]["fix"]["position"]["latitude"] == 1.0
         assert content[0]["fix"]["num_satellites"] == 7

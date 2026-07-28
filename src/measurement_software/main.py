@@ -38,7 +38,7 @@ def main() -> AppConfig:
     )
     run_status = RunStatusTracker(config.run_status)
     heartbeat = HeartbeatSender(config.heartbeat, run_status)
-    collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat)
+    collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat, config.device)
     uploader = Uploader(config.uploader)
 
     uploader.upload_pending_files()
