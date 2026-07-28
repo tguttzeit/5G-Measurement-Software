@@ -62,6 +62,15 @@ class Modem(ABC):
         ...
 
     @abstractmethod
+    def unlock_sim(self) -> None:
+        """Ensures the SIM is unlocked, entering its PIN if required.
+
+        Raises a SimUnlockError subclass on failure; never retries a rejected PIN and never
+        attempts PUK entry.
+        """
+        ...
+
+    @abstractmethod
     def query_cell_info(self) -> list[CellSample]:
         """Returns the modem's current cell measurements."""
         ...
