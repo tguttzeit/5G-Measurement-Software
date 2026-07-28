@@ -31,16 +31,15 @@ class SimStatus(StrEnum):
 class Quectel(Modem):
     """Modem implementation for Quectel modules, driven over a serial AT command interface."""
 
-    SIM_PIN_ENV_VAR = "MODEM_SIM_PIN"
-    SIM_UNLOCK_POLL_ATTEMPTS = 10
-    SIM_UNLOCK_POLL_INTERVAL = 1.0
-
     def __init__(self, config: ModemConfig):
         self._logger = logging.getLogger(__name__)
         self._port = config.port
         self._baud_rate = config.baud_rate
         self._timeout = config.timeout
         self._mode = QuectelMode(config.mode)
+        self._sim_pin_env_var = config.sim_pin_env_var
+        self._sim_unlock_poll_attempts = config.sim_unlock_poll_attempts
+        self._sim_unlock_poll_interval = config.sim_unlock_poll_interval
         self._serial: serial.Serial | None = None
 
     def open(self) -> None:
@@ -62,7 +61,8 @@ class Quectel(Modem):
         time.sleep(5)
 
     def unlock_sim(self) -> None:
-        """Unlocks the SIM if it's PIN-locked, entering the PIN from MODEM_SIM_PIN at most once.
+        """Unlocks the SIM if it's PIN-locked, entering the PIN from the configured env var at
+        most once.
 
         Never retries a rejected PIN and never attempts PUK entry - see SimUnlockError subclasses
         for the possible failure modes.
@@ -76,10 +76,10 @@ class Quectel(Modem):
         if status != SimStatus.SIM_PIN:
             raise SimStatusUnknownError(f"Could not determine SIM lock status (got {status!r}).")
 
-        pin = os.environ.get(self.SIM_PIN_ENV_VAR)
+        pin = os.environ.get(self._sim_pin_env_var)
         if not pin:
             raise SimPinNotConfiguredError(
-                f"SIM is PIN-locked but {self.SIM_PIN_ENV_VAR} is not set."
+                f"SIM is PIN-locked but {self._sim_pin_env_var} is not set."
             )
 
         response = self._send_pin(pin)
@@ -99,10 +99,10 @@ class Quectel(Modem):
         return self._connection.read_all().decode(errors="ignore")
 
     def _poll_until_ready(self) -> bool:
-        for _ in range(self.SIM_UNLOCK_POLL_ATTEMPTS):
+        for _ in range(self._sim_unlock_poll_attempts):
             if self._query_sim_status() == SimStatus.READY:
                 return True
-            time.sleep(self.SIM_UNLOCK_POLL_INTERVAL)
+            time.sleep(self._sim_unlock_poll_interval)
         return False
 
     def _query_sim_status(self) -> SimStatus:
