@@ -1,16 +1,12 @@
-import json
 import logging
 import subprocess
-from dataclasses import asdict
-from datetime import datetime, UTC
 from pathlib import Path
 
 from measurement_software.core.config import UploaderConfig
-from measurement_software.core.datapoint import Datapoint
 
 
 class Uploader:
-    """Saves collected datapoints to disk and uploads pending files to the remote server via scp."""
+    """Uploads finalized measurement files from the upload directory to the remote server via scp."""
 
     def __init__(self, config: UploaderConfig):
         self._logger = logging.getLogger(__name__)
@@ -20,21 +16,6 @@ class Uploader:
         self._port = config.upload_port
         self._remote_dir = config.remote_dir
         self._debug_upload = config.debug_upload
-
-    def save_datapoints(self, datapoints: list[Datapoint]) -> None:
-        """Writes datapoints to a timestamped JSON file in the upload directory."""
-        if not datapoints:
-            self._logger.info("No datapoints to save - skipping.")
-            return
-
-        self._upload_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"gps_5g_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.json"
-        filepath = self._upload_dir / filename
-
-        with open(filepath, "w") as f:
-            json.dump([asdict(dp) for dp in datapoints], f, indent=4)
-
-        self._logger.info("%d datapoints saved to %s", len(datapoints), filename)
 
     def upload_pending_files(self) -> None:
         """Uploads every pending JSON file via scp if a network interface is up, deleting each on success."""

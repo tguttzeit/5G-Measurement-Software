@@ -1,14 +1,10 @@
-import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from measurement_software.core.config import UploaderConfig
-from measurement_software.core.datapoint import Datapoint
 from measurement_software.core.uploader import Uploader
-from measurement_software.gnss.gnss_receiver import GNSSFix, Position
-from measurement_software.modems.modem import CellSample
 
 
 class FakeInterfaces:
@@ -70,11 +66,6 @@ def make_config(tmp_path: Path, **overrides) -> UploaderConfig:
     return UploaderConfig(**defaults)
 
 
-def make_datapoint() -> Datapoint:
-    fix = GNSSFix(position=Position(latitude=1.0, longitude=2.0, altitude=3.0), num_satellites=7)
-    return Datapoint(timestamp="2026-07-27T00:00:00Z", fix=fix, cell_sample=CellSample(rat="LTE"))
-
-
 @pytest.fixture
 def interfaces(monkeypatch) -> FakeInterfaces:
     fake = FakeInterfaces()
@@ -89,36 +80,6 @@ def scp(monkeypatch) -> FakeScp:
     return fake
 
 
-class TestSaveDatapoints:
-    def test_skips_and_creates_nothing_when_no_datapoints(self, tmp_path):
-        config = make_config(tmp_path)
-        uploader = Uploader(config)
-
-        uploader.save_datapoints([])
-
-        assert not Path(config.upload_dir).exists()
-
-    def test_creates_upload_dir_and_writes_json(self, tmp_path):
-        config = make_config(tmp_path)
-        uploader = Uploader(config)
-        dp = make_datapoint()
-
-        uploader.save_datapoints([dp])
-
-        upload_dir = Path(config.upload_dir)
-        assert upload_dir.is_dir()
-        files = list(upload_dir.glob("*.json"))
-        assert len(files) == 1
-        assert files[0].name.startswith("gps_5g_") and files[0].name.endswith(".json")
-
-        content = json.loads(files[0].read_text())
-        assert len(content) == 1
-        assert content[0]["timestamp"] == dp.timestamp
-        assert content[0]["cell_sample"]["rat"] == "LTE"
-        assert content[0]["fix"]["position"]["latitude"] == 1.0
-        assert content[0]["fix"]["num_satellites"] == 7
-
-
 class TestUploadPendingFiles:
     def test_skips_upload_when_no_network(self, tmp_path, interfaces, scp):
         config = make_config(tmp_path)
@@ -130,6 +91,22 @@ class TestUploadPendingFiles:
 
         assert scp.calls == []
         assert pending.exists()
+
+    def test_never_uploads_an_in_progress_run_log_or_a_stale_temp_file(self, tmp_path, interfaces, scp):
+        interfaces.up_ifaces = {"wlan0"}
+        config = make_config(tmp_path)
+        Path(config.upload_dir).mkdir(parents=True)
+        finalized = Path(config.upload_dir) / "gps_5g_20260101_000000.json"
+        run_log = Path(config.upload_dir) / "gps_5g_20260102_000000.jsonl"
+        stale_temp = Path(config.upload_dir) / "gps_5g_20260103_000000.json.tmp"
+        for path in (finalized, run_log, stale_temp):
+            path.write_text("[]")
+
+        Uploader(config).upload_pending_files()
+
+        assert [Path(c[-2]).name for c in scp.calls] == [finalized.name]
+        assert run_log.exists()
+        assert stale_temp.exists()
 
     def test_uploads_all_pending_files_in_sorted_order_and_deletes_on_success(self, tmp_path, interfaces, scp):
         interfaces.up_ifaces = {"wlan0"}
