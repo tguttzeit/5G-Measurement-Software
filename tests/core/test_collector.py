@@ -211,6 +211,48 @@ class TestCollect:
         assert [dp.fix.position for dp in result] == [pos_a, pos_b]
         assert modem.query_count == 2
 
+    def test_gps_disabled_captures_on_poll_interval_ignoring_movement_threshold(self, clock, keep_alive_mock):
+        # Alternating between the same spot and a nearby one that's below the default movement
+        # threshold: real movement-threshold gating would filter the "nearby" reads out entirely,
+        # so capturing all of them proves the poll-interval path is used instead.
+        pos_a = Position(latitude=0.0, longitude=0.0)
+        pos_a_nearby = Position(latitude=NORTH_5M, longitude=0.0)
+        fixes = [
+            GNSSFix(position=pos_a, num_satellites=0, placeholder=True),
+            GNSSFix(position=pos_a_nearby, num_satellites=0, placeholder=True),
+            GNSSFix(position=pos_a, num_satellites=0, placeholder=True),
+            GNSSFix(position=pos_a_nearby, num_satellites=0, placeholder=True),
+        ]
+        gnss = FakeGNSSReceiver(fixes=fixes, clock=clock, seconds_per_read=0.0)
+        modem = FakeModem(samples=[CellSample(rat="LTE")])
+        config = CollectorConfig(
+            gps_enabled=False,
+            gps_disabled_poll_interval_s=2.0,
+            max_idle_time=5.0,
+            max_wait_for_first_fix=1000,
+            wait_log_interval=1000,
+        )
+        collector = Collector(modem, gnss, config)
+
+        result = collector.collect()
+
+        # Idle time (unaffected by GPS-disabled captures) bounds the run: 4 captures 2s apart
+        # (t=0,2,4,6) before idle_duration (6s) clears max_idle_time (5s).
+        assert [dp.fix.position for dp in result] == [pos_a, pos_a_nearby, pos_a, pos_a_nearby]
+        assert all(dp.fix.placeholder for dp in result)
+        assert modem.query_count == 4
+
+    def test_gps_disabled_logs_a_startup_warning(self, clock, keep_alive_mock, caplog):
+        gnss = FakeGNSSReceiver(fixes=[], clock=clock)
+        modem = FakeModem()
+        config = CollectorConfig(gps_enabled=False, max_wait_for_first_fix=0, wait_log_interval=100)
+        collector = Collector(modem, gnss, config)
+
+        with caplog.at_level("WARNING"):
+            collector.collect()
+
+        assert any("GPS disabled" in record.message for record in caplog.records)
+
     def test_cleans_up_and_propagates_error_when_modem_raises(self, clock, keep_alive_mock):
         pos_a = Position(latitude=0.0, longitude=0.0)
         fix_a = GNSSFix(position=pos_a, num_satellites=8)
