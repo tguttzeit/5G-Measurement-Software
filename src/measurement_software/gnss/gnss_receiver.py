@@ -16,6 +16,8 @@ class GNSSFix:
 
     position: Position
     num_satellites: int
+    # True for a dummy fix (e.g. from a GPS-disabled testing run) — position is not real data.
+    placeholder: bool = False
 
 class GNSSReceiver(ABC):
     """Interface for a GNSS receiver that can be opened, closed, and polled for fixes."""

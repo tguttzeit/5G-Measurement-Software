@@ -37,6 +37,8 @@ class Collector:
         self._max_idle_time = config.max_idle_time
         self._max_wait_for_first_fix = config.max_wait_for_first_fix
         self._wait_log_interval = config.wait_log_interval
+        self._gps_enabled = config.gps_enabled
+        self._gps_disabled_poll_interval_s = config.gps_disabled_poll_interval_s
 
         self._keep_modem_alive = KeepModemAliveSender(
             config.keep_alive_host, config.keep_alive_port, config.keep_alive_interval_s
@@ -54,6 +56,11 @@ class Collector:
         self._keep_modem_alive.start()
         self._heartbeat.start()
         self._logger.info("Starting data collection...")
+        if not self._gps_enabled:
+            self._logger.warning(
+                "GPS disabled (config.collector.gps_enabled=false) — using placeholder fixes, "
+                "not real GNSS hardware. Testing mode only."
+            )
 
         try:
             first_fix = self._wait_for_first_fix()
@@ -65,7 +72,7 @@ class Collector:
             self._last_movement_time = None
 
             for fix in self._iter_fixes(first_fix):
-                if self._has_moved_enough(fix):
+                if self._should_capture(fix):
                     datapoints.extend(self._capture_datapoints(fix))
 
                 if self._has_been_idle_too_long():
@@ -102,12 +109,30 @@ class Collector:
                 return fix
 
     def _iter_fixes(self, first_fix: GNSSFix) -> Iterator[GNSSFix]:
-        """Yields the first fix, then every subsequent non-None fix from the receiver, forever."""
+        """Yields the first fix, then every subsequent non-None fix from the receiver, forever.
+
+        With GPS disabled, the receiver has no natural read pace of its own (unlike blocking on
+        real serial I/O), so this paces reads itself at gps_disabled_poll_interval_s.
+        """
         yield first_fix
         while True:
+            if not self._gps_enabled:
+                time.sleep(self._gps_disabled_poll_interval_s)
             fix = self._gnss_receiver.read_fix()
             if fix is not None:
                 yield fix
+
+    def _should_capture(self, fix: GNSSFix) -> bool:
+        """Decides whether to query the modem for this fix.
+
+        With GPS disabled there's no real position to gate on — haversine distance between
+        identical placeholder fixes is always 0 — so every paced fix captures unconditionally
+        instead of going through movement-threshold gating. Unlike a genuine movement, this never
+        resets the idle clock, so max_idle_time still bounds how long a GPS-disabled run lasts.
+        """
+        if not self._gps_enabled:
+            return True
+        return self._has_moved_enough(fix)
 
     def _has_moved_enough(self, fix: GNSSFix) -> bool:
         """Returns True and updates the reference position if the fix cleared the movement threshold."""

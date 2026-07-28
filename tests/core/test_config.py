@@ -35,6 +35,8 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.modem.port == "/dev/ttyUSB2"
     assert config.uploader.upload_host == "example.org"
     assert config.collector.max_idle_time == 200
+    assert config.collector.gps_enabled is True
+    assert config.collector.gps_disabled_poll_interval_s == 5.0
     assert config.run_status.lte.min_rsrp == -100.0
     assert config.run_status.nr.min_sinr == 0.0
     assert config.run_status.empty_captures_until_pipeline_broken == 3
@@ -49,6 +51,8 @@ def test_load_config_overrides_defaults_when_optional_sections_present(tmp_path)
 [collector]
 max_idle_time = 42
 position_threshold = 5
+gps_enabled = false
+gps_disabled_poll_interval_s = 2.5
 
 [logging]
 level = "DEBUG"
@@ -60,6 +64,8 @@ running_on_pi = false
 
     assert config.collector.max_idle_time == 42
     assert config.collector.position_threshold == 5
+    assert config.collector.gps_enabled is False
+    assert config.collector.gps_disabled_poll_interval_s == 2.5
     assert config.logging.level == "DEBUG"
     assert config.system.running_on_pi is False
 
