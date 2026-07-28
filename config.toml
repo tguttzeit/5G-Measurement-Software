@@ -28,6 +28,33 @@ keep_alive_interval_s = 4.0
 gps_enabled = true
 gps_disabled_poll_interval_s = 5.0
 
+# Periodic report to the backend on how the current run is going. The url must be https,
+# since the backend's answers are a path for instructions to reach the device.
+[heartbeat]
+enabled = false
+url = "https://add.your.backend.here/heartbeat"
+interval_s = 60.0
+timeout_s = 10.0
+
+# What the heartbeat reports about the run. A measurement counts as "good" only if it clears
+# every cutoff below; falling short on any one of them makes it "bad". Cutoffs are set per RAT,
+# and only apply to readings that are physically possible in the first place - an impossible
+# value counts as "invalid" instead, which is decided from the radio standard, not from here.
+[run_status]
+# How many consecutive captures may come back empty while the device is moving before the
+# heartbeat reports the measurement pipeline as broken.
+empty_captures_until_pipeline_broken = 3
+
+[run_status.lte]
+min_rsrp = -100.0
+min_rsrq = -11.0
+min_sinr = 0.0
+
+[run_status.nr]
+min_rsrp = -100.0
+min_rsrq = -11.0
+min_sinr = 0.0
+
 [uploader]
 upload_dir = "/home/admin/Logger/upload_queue"
 upload_user = "tim"

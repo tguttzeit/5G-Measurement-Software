@@ -1,5 +1,5 @@
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 @dataclass
@@ -36,6 +36,41 @@ class CollectorConfig:
     gps_disabled_poll_interval_s: float = 5.0
 
 @dataclass
+class QualityThresholds:
+    """Cutoffs a cell measurement has to clear on every metric to count as good.
+
+    The defaults are commonly-cited reference values of the kind drive-test tools use as
+    their default tiers. They have not been validated against this project's own
+    measurements, and are meant to be retuned per RAT once field data exists.
+    """
+
+    min_rsrp: float = -100.0
+    min_rsrq: float = -11.0
+    min_sinr: float = 0.0
+
+@dataclass
+class RunStatusConfig:
+    """Per-RAT quality thresholds and how many empty captures mean the pipeline is broken."""
+
+    lte: QualityThresholds = field(default_factory=QualityThresholds)
+    nr: QualityThresholds = field(default_factory=QualityThresholds)
+    empty_captures_until_pipeline_broken: int = 3
+
+@dataclass
+class HeartbeatConfig:
+    """Backend heartbeat destination and cadence. Disabled unless a section says otherwise.
+
+    The URL has to be https. The device initiates every contact and the backend answers,
+    which makes the response a path for instructions to reach the device — so the transport
+    has to be one where the device can trust who it is talking to.
+    """
+
+    enabled: bool = False
+    url: str = ""
+    interval_s: float = 60.0
+    timeout_s: float = 10.0
+
+@dataclass
 class UploaderConfig:
     """Local storage and scp destination settings for uploading saved measurements."""
 
@@ -70,6 +105,8 @@ class AppConfig:
     modem: ModemConfig
     gnss_receiver: GnssConfig
     collector: CollectorConfig
+    run_status: RunStatusConfig
+    heartbeat: HeartbeatConfig
     uploader: UploaderConfig
     logging: LoggingConfig
     system: SystemConfig
@@ -82,7 +119,14 @@ def load_config(path: Path) -> AppConfig:
         modem=ModemConfig(**raw["modem"]),
         gnss_receiver=GnssConfig(**raw["gnss_receiver"]),
         collector=CollectorConfig(**raw.get("collector", {})),
+        run_status=_build_run_status_config(raw.get("run_status", {})),
+        heartbeat=HeartbeatConfig(**raw.get("heartbeat", {})),
         uploader=UploaderConfig(**raw["uploader"]),
         logging=LoggingConfig(**raw.get("logging", {})),
         system=SystemConfig(**raw.get("system", {})),
     )
+
+def _build_run_status_config(raw: dict) -> RunStatusConfig:
+    """Builds a RunStatusConfig, expanding its per-RAT sub-tables into QualityThresholds."""
+    per_rat_thresholds = {rat: QualityThresholds(**raw.get(rat, {})) for rat in ("lte", "nr")}
+    return RunStatusConfig(**(raw | per_rat_thresholds))
