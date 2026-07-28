@@ -4,15 +4,34 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
-from measurement_software.core.config import HeartbeatConfig, RunStatusConfig
+from measurement_software.core.config import HeartbeatConfig, RunStatusConfig, StorageConfig
 from measurement_software.core.heartbeat_sender import HeartbeatSender
 from measurement_software.core.run_status import RunStatusTracker
+from measurement_software.core.storage_status import StorageStatusReporter
 from measurement_software.modems.modem import CellSample
 
 URL = "https://backend.example.org/heartbeat"
+
+
+class FakeDiskUsage:
+    def __init__(self, free: int):
+        self.free = free
+
+
+@pytest.fixture(autouse=True)
+def disk_usage(monkeypatch) -> FakeDiskUsage:
+    """Fakes shutil.disk_usage so the storage stat in the heartbeat payload is deterministic."""
+    fake = FakeDiskUsage(free=10_000_000_000)
+    monkeypatch.setattr("measurement_software.core.storage_status.shutil.disk_usage", lambda path: fake)
+    return fake
+
+
+def storage_status_for(tmp_path: Path) -> StorageStatusReporter:
+    return StorageStatusReporter(tmp_path / "uploads", StorageConfig())
 
 
 class FakeResponse:
@@ -80,9 +99,11 @@ def tracker_with(*samples: CellSample) -> RunStatusTracker:
 
 
 class TestHeartbeatSender:
-    def test_posts_the_current_run_status_right_away(self, backend):
+    def test_posts_the_current_run_status_right_away(self, backend, tmp_path):
         tracker = tracker_with(CellSample(rat="LTE", rsrp=-80.0, rsrq=-8.0, sinr=12.0))
-        sender = HeartbeatSender(HeartbeatConfig(enabled=True, url=URL, interval_s=3600), tracker)
+        sender = HeartbeatSender(
+            HeartbeatConfig(enabled=True, url=URL, interval_s=3600), tracker, storage_status_for(tmp_path),
+        )
 
         sender.start()
         wait_for_requests(backend, 1)
@@ -95,12 +116,15 @@ class TestHeartbeatSender:
         assert backend.payloads()[0] == {
             "since_run_start": {"datapoints_total": 1, "good": 1, "bad": 0, "invalid": 0},
             "pipeline_broken": False,
+            "storage": {"pending_files": 0, "disk_free_bytes": 10_000_000_000},
         }
         assert backend.timeouts[0] == 10.0
 
-    def test_keeps_reporting_on_the_configured_interval(self, backend):
+    def test_keeps_reporting_on_the_configured_interval(self, backend, tmp_path):
         tracker = RunStatusTracker(RunStatusConfig())
-        sender = HeartbeatSender(HeartbeatConfig(enabled=True, url=URL, interval_s=0.01), tracker)
+        sender = HeartbeatSender(
+            HeartbeatConfig(enabled=True, url=URL, interval_s=0.01), tracker, storage_status_for(tmp_path),
+        )
 
         sender.start()
         wait_for_requests(backend, 3)
@@ -108,9 +132,11 @@ class TestHeartbeatSender:
 
         assert backend.request_count() >= 3
 
-    def test_each_report_reflects_the_run_so_far(self, backend):
+    def test_each_report_reflects_the_run_so_far(self, backend, tmp_path):
         tracker = RunStatusTracker(RunStatusConfig())
-        sender = HeartbeatSender(HeartbeatConfig(enabled=True, url=URL, interval_s=0.01), tracker)
+        sender = HeartbeatSender(
+            HeartbeatConfig(enabled=True, url=URL, interval_s=0.01), tracker, storage_status_for(tmp_path),
+        )
 
         sender.start()
         wait_for_requests(backend, 1)
@@ -123,10 +149,29 @@ class TestHeartbeatSender:
             "datapoints_total": 1, "good": 0, "bad": 1, "invalid": 0,
         }
 
-    def test_survives_a_backend_it_cannot_reach(self, backend):
+    def test_each_report_reflects_the_current_backlog(self, backend, tmp_path):
+        upload_dir = tmp_path / "uploads"
+        upload_dir.mkdir()
+        tracker = RunStatusTracker(RunStatusConfig())
+        sender = HeartbeatSender(
+            HeartbeatConfig(enabled=True, url=URL, interval_s=0.01), tracker, storage_status_for(tmp_path),
+        )
+
+        sender.start()
+        wait_for_requests(backend, 1)
+        (upload_dir / "gps_5g_20260101_000000.json").write_text("[]")
+        wait_for_requests(backend, backend.request_count() + 2)
+        sender.stop()
+
+        assert backend.payloads()[0]["storage"]["pending_files"] == 0
+        assert backend.payloads()[-1]["storage"]["pending_files"] == 1
+
+    def test_survives_a_backend_it_cannot_reach(self, backend, tmp_path):
         backend.fail_first = 2
         tracker = RunStatusTracker(RunStatusConfig())
-        sender = HeartbeatSender(HeartbeatConfig(enabled=True, url=URL, interval_s=0.01), tracker)
+        sender = HeartbeatSender(
+            HeartbeatConfig(enabled=True, url=URL, interval_s=0.01), tracker, storage_status_for(tmp_path),
+        )
 
         sender.start()
         wait_for_requests(backend, 4)
@@ -135,17 +180,19 @@ class TestHeartbeatSender:
         # The failed sends must not have killed the reporting thread.
         assert backend.request_count() >= 4
 
-    def test_stays_silent_when_disabled(self, backend):
-        sender = HeartbeatSender(HeartbeatConfig(enabled=False, url=URL), RunStatusTracker(RunStatusConfig()))
+    def test_stays_silent_when_disabled(self, backend, tmp_path):
+        sender = HeartbeatSender(
+            HeartbeatConfig(enabled=False, url=URL), RunStatusTracker(RunStatusConfig()), storage_status_for(tmp_path),
+        )
 
         sender.start()
         sender.stop()
 
         assert backend.request_count() == 0
 
-    def test_refuses_a_url_that_is_not_https(self, backend, caplog):
+    def test_refuses_a_url_that_is_not_https(self, backend, caplog, tmp_path):
         config = HeartbeatConfig(enabled=True, url="http://backend.example.org/heartbeat")
-        sender = HeartbeatSender(config, RunStatusTracker(RunStatusConfig()))
+        sender = HeartbeatSender(config, RunStatusTracker(RunStatusConfig()), storage_status_for(tmp_path))
 
         with caplog.at_level(logging.ERROR):
             sender.start()
@@ -154,7 +201,9 @@ class TestHeartbeatSender:
         assert backend.request_count() == 0
         assert "https" in caplog.text
 
-    def test_stopping_without_starting_is_harmless(self, backend):
-        HeartbeatSender(HeartbeatConfig(enabled=True, url=URL), RunStatusTracker(RunStatusConfig())).stop()
+    def test_stopping_without_starting_is_harmless(self, backend, tmp_path):
+        HeartbeatSender(
+            HeartbeatConfig(enabled=True, url=URL), RunStatusTracker(RunStatusConfig()), storage_status_for(tmp_path),
+        ).stop()
 
         assert backend.request_count() == 0
