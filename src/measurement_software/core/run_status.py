@@ -1,3 +1,4 @@
+import threading
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -28,6 +29,66 @@ class LegalRanges:
 
 LTE_LEGAL_RANGES = LegalRanges(rsrp=(-140.0, -44.0), rsrq=(-19.5, 2.5), sinr=(-20.0, 30.0))
 NR_LEGAL_RANGES = LegalRanges(rsrp=(-156.0, -31.0), rsrq=(-43.0, 20.0), sinr=(-23.0, 40.0))
+
+
+@dataclass(frozen=True)
+class RunStatus:
+    """How a run is doing so far: how good its data is, and whether it is producing any at all."""
+
+    datapoints_total: int
+    good: int
+    bad: int
+    invalid: int
+    pipeline_broken: bool
+
+    def as_payload(self) -> dict:
+        """Renders the status as the heartbeat body defined in decision record 0001."""
+        return {
+            "since_run_start": {
+                "datapoints_total": self.datapoints_total,
+                "good": self.good,
+                "bad": self.bad,
+                "invalid": self.invalid,
+            },
+            "pipeline_broken": self.pipeline_broken,
+        }
+
+
+class RunStatusTracker:
+    """Accumulates a run's data-quality counts and pipeline health as measurements come in.
+
+    Counts are cumulative since the start of the run, so any single heartbeat reflects
+    the whole run rather than one interval's worth of it. Reads happen from the heartbeat
+    thread while the collector writes, hence the lock.
+    """
+
+    def __init__(self, config: RunStatusConfig):
+        self._config = config
+        self._lock = threading.Lock()
+        self._counts = dict.fromkeys(SampleQuality, 0)
+        self._consecutive_empty_captures = 0
+
+    def record_capture(self, samples: list[CellSample]) -> None:
+        """Records one movement-triggered modem query and classifies whatever it returned."""
+        with self._lock:
+            for sample in samples:
+                self._counts[classify_sample(sample, self._config)] += 1
+            self._consecutive_empty_captures = 0 if samples else self._consecutive_empty_captures + 1
+
+    def status(self) -> RunStatus:
+        """Returns a consistent snapshot of the run so far."""
+        with self._lock:
+            return RunStatus(
+                datapoints_total=sum(self._counts.values()),
+                good=self._counts[SampleQuality.GOOD],
+                bad=self._counts[SampleQuality.BAD],
+                invalid=self._counts[SampleQuality.INVALID],
+                pipeline_broken=self._is_pipeline_broken(),
+            )
+
+    def _is_pipeline_broken(self) -> bool:
+        """True once the device has moved repeatedly without the modem yielding anything."""
+        return self._consecutive_empty_captures >= self._config.empty_captures_until_pipeline_broken
 
 
 def classify_sample(sample: CellSample, config: RunStatusConfig) -> SampleQuality:
