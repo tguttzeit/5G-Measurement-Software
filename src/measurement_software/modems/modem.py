@@ -20,6 +20,34 @@ class CellSample:
     vendor_specific_extras: dict | None = None
 
 
+class SimUnlockError(Exception):
+    """Base class for SIM-unlock failures."""
+
+
+class SimPinNotConfiguredError(SimUnlockError):
+    """Raised when the SIM is PIN-locked but no PIN is available to attempt an unlock."""
+
+
+class SimPinRejectedError(SimUnlockError):
+    """Raised when the modem rejects the PIN outright.
+
+    Must never be retried automatically with the same value: most SIMs permanently lock after a
+    small number of wrong attempts and then demand a PUK.
+    """
+
+
+class SimPukRequiredError(SimUnlockError):
+    """Raised when the SIM has moved to requiring a PUK.
+
+    This codebase must never attempt PUK entry - too many wrong PUK attempts can permanently brick
+    the SIM.
+    """
+
+
+class SimStatusUnknownError(SimUnlockError):
+    """Raised when the SIM's lock status can't be determined from the modem's response."""
+
+
 class Modem(ABC):
     """Interface for a cellular modem that can be opened, closed, queried, and powered down."""
 
