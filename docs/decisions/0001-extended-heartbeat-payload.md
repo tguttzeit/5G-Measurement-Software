@@ -7,6 +7,12 @@ needs to signal more than liveness: whether the run is currently producing data 
 whether the data it's producing is worth keeping. This record covers three decisions made while
 scoping that out, before implementation started.
 
+> **Superseded assumption**: this record originally assumed plain HTTP for the heartbeat transport.
+> [0007](0007-remote-access-design.md) later repurposed this same channel to also carry remote
+> config overrides and one-shot commands ([#8](https://github.com/tguttzeit/5G-Measurement-Software/issues/8)),
+> which makes HTTPS with response authentication a hard requirement, not a nice-to-have — see 0007
+> for the reasoning.
+
 ## Decision
 
 **1. "Suspicious" is two independent signals, not one.**
