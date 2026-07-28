@@ -2,11 +2,13 @@ import logging
 import time
 from datetime import datetime, UTC
 from math import radians, sin, cos, asin, sqrt
+from pathlib import Path
 from typing import Iterator
 
 from measurement_software.core.config import CollectorConfig
 from measurement_software.core.datapoint import Datapoint
 from measurement_software.core.keep_modem_alive_sender import KeepModemAliveSender
+from measurement_software.core.run_log import RunLog
 from measurement_software.gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
 from measurement_software.modems.modem import Modem
 
@@ -14,10 +16,11 @@ from measurement_software.modems.modem import Modem
 class Collector:
     """Runs a GPS-triggered measurement session, sampling the modem whenever the device moves."""
 
-    def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig):
+    def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig, run_log: RunLog):
         self._logger = logging.getLogger(__name__)
         self._modem = modem
         self._gnss_receiver = gnss_receiver
+        self._run_log = run_log
 
         self._position_threshold = config.position_threshold
         self._max_idle_time = config.max_idle_time
@@ -31,10 +34,15 @@ class Collector:
         self._last_pos: Position | None = None
         self._last_movement_time: float | None = None
 
-    def collect(self) -> list[Datapoint]:
-        """Waits for a GPS fix, then collects datapoints until movement stops for too long."""
+    def collect(self) -> Path:
+        """Waits for a GPS fix, then records datapoints until movement stops for too long.
+
+        Returns the run log written, which holds everything captured up to the moment the
+        session ended - including a session ended by the power being cut.
+        """
         self._modem.open()
         self._gnss_receiver.open()
+        self._run_log.open()
         time.sleep(1)
 
         self._keep_modem_alive.start()
@@ -42,27 +50,28 @@ class Collector:
 
         try:
             first_fix = self._wait_for_first_fix()
-            if first_fix is None:
-                return []
-
-            datapoints: list[Datapoint] = []
-            self._last_pos = None
-            self._last_movement_time = None
-
-            for fix in self._iter_fixes(first_fix):
-                if self._has_moved_enough(fix):
-                    datapoints.extend(self._capture_datapoints(fix))
-
-                if self._has_been_idle_too_long():
-                    break
-
+            if first_fix is not None:
+                self._record_until_idle(first_fix)
         finally:
             self._keep_modem_alive.stop()
+            self._run_log.close()
             self._gnss_receiver.close()
             self._modem.close()
             self._logger.info("Finished data collection")
 
-        return datapoints
+        return self._run_log.path
+
+    def _record_until_idle(self, first_fix: GNSSFix) -> None:
+        """Records a datapoint for every qualifying movement until the device sits still for too long."""
+        self._last_pos = None
+        self._last_movement_time = None
+
+        for fix in self._iter_fixes(first_fix):
+            if self._has_moved_enough(fix):
+                self._run_log.append(self._capture_datapoints(fix))
+
+            if self._has_been_idle_too_long():
+                break
 
     def _wait_for_first_fix(self) -> GNSSFix | None:
         """Blocks until the receiver reports a fix, or returns None if none arrives in time."""
