@@ -8,6 +8,7 @@ from measurement_software.core.config import load_config, AppConfig
 from measurement_software.core.logging_setup import setup_logging
 from measurement_software.core.uploader import Uploader
 from measurement_software.gnss import create_gnss_receiver
+from measurement_software.gnss.null_gnss_receiver import NullGNSSReceiver
 from measurement_software.modems import create_modem
 from measurement_software.core.system import setup_gpio, signal_completion, cleanup_gpio, perform_shutdown, log_ip_addrs
 
@@ -28,7 +29,11 @@ def main() -> AppConfig:
         setup_gpio(config.system.shutdown_gpio)
 
     modem = create_modem(config.modem)
-    gnss_receiver = create_gnss_receiver(config.gnss_receiver)
+    gnss_receiver = (
+        create_gnss_receiver(config.gnss_receiver)
+        if config.collector.gps_enabled
+        else NullGNSSReceiver()
+    )
     collector = Collector(modem, gnss_receiver, config.collector)
     uploader = Uploader(config.uploader)
 
