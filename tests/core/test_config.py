@@ -35,6 +35,9 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.modem.port == "/dev/ttyUSB2"
     assert config.uploader.upload_host == "example.org"
     assert config.collector.max_idle_time == 200
+    assert config.run_status.lte.min_rsrp == -100.0
+    assert config.run_status.nr.min_sinr == 0.0
+    assert config.run_status.empty_captures_until_pipeline_broken == 3
     assert config.logging.level == "INFO"
     assert config.system.running_on_pi is True
     assert config.system.network_interfaces == ("wlan0", "wwan0")
@@ -58,3 +61,22 @@ running_on_pi = false
     assert config.collector.position_threshold == 5
     assert config.logging.level == "DEBUG"
     assert config.system.running_on_pi is False
+
+
+def test_load_config_reads_per_rat_quality_thresholds(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[run_status]
+empty_captures_until_pipeline_broken = 5
+
+[run_status.nr]
+min_rsrp = -95.0
+min_sinr = 3.0
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.run_status.empty_captures_until_pipeline_broken == 5
+    assert config.run_status.nr.min_rsrp == -95.0
+    assert config.run_status.nr.min_sinr == 3.0
+    # Thresholds not given for a RAT fall back to the defaults, per RAT independently.
+    assert config.run_status.nr.min_rsrq == -11.0
+    assert config.run_status.lte.min_rsrp == -100.0

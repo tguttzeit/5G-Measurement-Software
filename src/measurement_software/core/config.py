@@ -1,5 +1,5 @@
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 @dataclass
@@ -32,6 +32,26 @@ class CollectorConfig:
     keep_alive_host: str = "8.8.8.8"
     keep_alive_port: int = 53
     keep_alive_interval_s: float = 4.0
+
+@dataclass
+class QualityThresholds:
+    """Cutoffs a cell measurement has to clear on every metric to count as good.
+
+    Starting values are the reference cutoffs from decision record 0002, expected to be
+    retuned per RAT once real field data exists.
+    """
+
+    min_rsrp: float = -100.0
+    min_rsrq: float = -11.0
+    min_sinr: float = 0.0
+
+@dataclass
+class RunStatusConfig:
+    """Per-RAT quality thresholds and how many empty captures mean the pipeline is broken."""
+
+    lte: QualityThresholds = field(default_factory=QualityThresholds)
+    nr: QualityThresholds = field(default_factory=QualityThresholds)
+    empty_captures_until_pipeline_broken: int = 3
 
 @dataclass
 class UploaderConfig:
@@ -68,6 +88,7 @@ class AppConfig:
     modem: ModemConfig
     gnss_receiver: GnssConfig
     collector: CollectorConfig
+    run_status: RunStatusConfig
     uploader: UploaderConfig
     logging: LoggingConfig
     system: SystemConfig
@@ -80,7 +101,13 @@ def load_config(path: Path) -> AppConfig:
         modem=ModemConfig(**raw["modem"]),
         gnss_receiver=GnssConfig(**raw["gnss_receiver"]),
         collector=CollectorConfig(**raw.get("collector", {})),
+        run_status=_build_run_status_config(raw.get("run_status", {})),
         uploader=UploaderConfig(**raw["uploader"]),
         logging=LoggingConfig(**raw.get("logging", {})),
         system=SystemConfig(**raw.get("system", {})),
     )
+
+def _build_run_status_config(raw: dict) -> RunStatusConfig:
+    """Builds a RunStatusConfig, expanding its per-RAT sub-tables into QualityThresholds."""
+    per_rat_thresholds = {rat: QualityThresholds(**raw.get(rat, {})) for rat in ("lte", "nr")}
+    return RunStatusConfig(**(raw | per_rat_thresholds))
