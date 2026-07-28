@@ -71,6 +71,16 @@ class HeartbeatConfig:
     timeout_s: float = 10.0
 
 @dataclass
+class StorageConfig:
+    """Free-disk-space tripwire threshold for the upload backlog directory.
+
+    Not a retained-file cap or eviction policy - the backlog is expected to stay small (see
+    decision record 0009) - just a loud early warning in case that expectation turns out wrong.
+    """
+
+    low_free_space_warning_bytes: int = 500_000_000
+
+@dataclass
 class UploaderConfig:
     """Local storage and scp destination settings for uploading saved measurements."""
 
@@ -107,6 +117,7 @@ class AppConfig:
     collector: CollectorConfig
     run_status: RunStatusConfig
     heartbeat: HeartbeatConfig
+    storage: StorageConfig
     uploader: UploaderConfig
     logging: LoggingConfig
     system: SystemConfig
@@ -121,6 +132,7 @@ def load_config(path: Path) -> AppConfig:
         collector=CollectorConfig(**raw.get("collector", {})),
         run_status=_build_run_status_config(raw.get("run_status", {})),
         heartbeat=HeartbeatConfig(**raw.get("heartbeat", {})),
+        storage=StorageConfig(**raw.get("storage", {})),
         uploader=UploaderConfig(**raw["uploader"]),
         logging=LoggingConfig(**raw.get("logging", {})),
         system=SystemConfig(**raw.get("system", {})),

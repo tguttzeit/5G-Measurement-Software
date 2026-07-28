@@ -41,6 +41,7 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.run_status.nr.min_sinr == 0.0
     assert config.run_status.empty_captures_until_pipeline_broken == 3
     assert config.heartbeat.enabled is False
+    assert config.storage.low_free_space_warning_bytes == 500_000_000
     assert config.logging.level == "INFO"
     assert config.system.running_on_pi is True
     assert config.system.network_interfaces == ("wlan0", "wwan0")
@@ -83,6 +84,16 @@ interval_s = 30.0
     assert config.heartbeat.url == "https://backend.example.org/heartbeat"
     assert config.heartbeat.interval_s == 30.0
     assert config.heartbeat.timeout_s == 10.0
+
+
+def test_load_config_reads_storage_section(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[storage]
+low_free_space_warning_bytes = 100_000_000
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.storage.low_free_space_warning_bytes == 100_000_000
 
 
 def test_load_config_reads_per_rat_quality_thresholds(tmp_path):
