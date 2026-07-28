@@ -25,6 +25,8 @@ wait_log_interval = 5
 keep_alive_host = "8.8.8.8"
 keep_alive_port = 53
 keep_alive_interval_s = 4.0
+gps_enabled = true
+gps_disabled_poll_interval_s = 5.0
 
 [uploader]
 upload_dir = "/home/admin/Logger/upload_queue"
