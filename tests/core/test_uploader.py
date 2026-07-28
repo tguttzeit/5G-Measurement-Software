@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from measurement_software.core.collector import Datapoint
 from measurement_software.core.config import UploaderConfig
+from measurement_software.core.datapoint import Datapoint
 from measurement_software.core.uploader import Uploader
 from measurement_software.gnss.gnss_receiver import GNSSFix, Position
 from measurement_software.modems.modem import CellSample

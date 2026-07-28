@@ -1,23 +1,14 @@
 import logging
 import time
-from dataclasses import dataclass
 from datetime import datetime, UTC
 from math import radians, sin, cos, asin, sqrt
 from typing import Iterator
 
 from measurement_software.core.config import CollectorConfig
+from measurement_software.core.datapoint import Datapoint
 from measurement_software.core.keep_modem_alive_sender import KeepModemAliveSender
 from measurement_software.gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
-from measurement_software.modems.modem import Modem, CellSample
-
-
-@dataclass
-class Datapoint:
-    """A single cell-info sample paired with the GNSS fix and timestamp it was captured at."""
-
-    timestamp: str
-    fix: GNSSFix
-    cell_sample: CellSample
+from measurement_software.modems.modem import Modem
 
 
 class Collector:

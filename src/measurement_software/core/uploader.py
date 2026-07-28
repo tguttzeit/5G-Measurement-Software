@@ -5,8 +5,8 @@ from dataclasses import asdict
 from datetime import datetime, UTC
 from pathlib import Path
 
-from measurement_software.core.collector import Datapoint
 from measurement_software.core.config import UploaderConfig
+from measurement_software.core.datapoint import Datapoint
 
 
 class Uploader:
