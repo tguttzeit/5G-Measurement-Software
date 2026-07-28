@@ -25,9 +25,13 @@ the fan control or shutdown-signal GPIO are. Relevant to
 [#14](https://github.com/tguttzeit/5G-Measurement-Software/issues/14)'s pin-coordination work: this
 doesn't compete for a pin the way those do.
 
-**Testing-mode indicator**: if [#17](https://github.com/tguttzeit/5G-Measurement-Software/issues/17)
-(GPS-disabled testing mode) is active, the display should prominently show that — satisfying #17's
-"loudly, visibly flagged" requirement better than a log line would in the field.
+**Special-config indicator, generalized rather than GPS-only**: a dedicated section of the display
+lists whatever testing/non-default config flags are currently active — starting with
+[#17](https://github.com/tguttzeit/5G-Measurement-Software/issues/17)'s `gps_enabled = false`, but
+built as an extensible list rather than a single hardcoded GPS check, so future testing/debug flags
+can be surfaced without rewriting display logic each time. This satisfies #17's "loudly, visibly
+flagged" requirement better than a log line would in the field, and generalizes to catch any other
+case of a non-default flag being left on by accident before a real mission run.
 
 ## Reasoning
 
