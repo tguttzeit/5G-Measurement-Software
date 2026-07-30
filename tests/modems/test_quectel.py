@@ -4,7 +4,15 @@ import pytest
 import serial
 
 from measurement_software.core.config import ModemConfig
-from measurement_software.modems.quectel import Quectel
+from measurement_software.modems.modem import (
+    SimPinNotConfiguredError,
+    SimPinRejectedError,
+    SimPukRequiredError,
+    SimStatusUnknownError,
+)
+from measurement_software.modems.quectel import Quectel, SimStatus
+
+SIM_PIN_ENV_VAR = "MODEM_SIM_PIN"
 
 
 def make_config(**overrides) -> ModemConfig:
@@ -14,10 +22,12 @@ def make_config(**overrides) -> ModemConfig:
 
 
 class FakeSerial:
-    """Fakes pyserial's Serial, recording writes and returning a scripted response.
+    """Fakes pyserial's Serial, recording writes and returning scripted responses.
 
-    `read_all_sequence`, if set, scripts successive `read_all()` calls (an entry that is an
-    Exception is raised instead of returned) — otherwise every call just returns `response`.
+    `response` is returned for every read_all() call. For interactions with more than one
+    write/read round trip, set `responses` instead - each read_all() pops the next entry.
+    `read_all_sequence`, if set, takes priority and scripts successive `read_all()` calls (an
+    entry that is an Exception is raised instead of returned).
     """
 
     def __init__(self, *args, response: bytes = b"", **kwargs):
@@ -25,6 +35,7 @@ class FakeSerial:
         self.kwargs = kwargs
         self.response = response
         self.read_all_sequence: list[bytes | Exception] | None = None
+        self.responses: list[bytes] = []
         self.written: list[bytes] = []
         self.closed = False
 
@@ -37,6 +48,8 @@ class FakeSerial:
             if isinstance(item, Exception):
                 raise item
             return item
+        if self.responses:
+            return self.responses.pop(0)
         return self.response
 
     def close(self) -> None:
@@ -360,6 +373,180 @@ class TestQueryCellInfoRetry:
 
         assert samples == []
         assert "No QENG measurements found" in caplog.text
+
+
+class TestParseCpinResponse:
+    def test_ready(self):
+        assert Quectel._parse_cpin_response("+CPIN: READY\n\nOK\n") == SimStatus.READY
+
+    def test_sim_pin_locked(self):
+        assert Quectel._parse_cpin_response("+CPIN: SIM PIN\n\nOK\n") == SimStatus.SIM_PIN
+
+    def test_sim_puk_locked(self):
+        assert Quectel._parse_cpin_response("+CPIN: SIM PUK\n\nOK\n") == SimStatus.SIM_PUK
+
+    def test_unrecognized_response_is_unknown(self):
+        assert Quectel._parse_cpin_response("garbled\n") == SimStatus.UNKNOWN
+
+    def test_empty_response_is_unknown(self):
+        assert Quectel._parse_cpin_response("") == SimStatus.UNKNOWN
+
+
+class TestQuerySimStatus:
+    def test_sends_cpin_query_and_parses_response(self, fake_serials):
+        modem = Quectel(make_config())
+        modem.open()
+        fake_serials[0].response = b"+CPIN: READY\n\nOK\n"
+
+        status = modem._query_sim_status()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r"]
+        assert status == SimStatus.READY
+
+
+class TestUnlockSim:
+    def _open_modem(self, fake_serials) -> Quectel:
+        modem = Quectel(make_config())
+        modem.open()
+        return modem
+
+    def test_already_unlocked_is_a_noop(self, fake_serials, monkeypatch):
+        monkeypatch.delenv(SIM_PIN_ENV_VAR, raising=False)
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].response = b"+CPIN: READY\n\nOK\n"
+
+        modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r"]
+
+    def test_puk_required_raises_and_never_sends_a_pin(self, fake_serials, monkeypatch):
+        monkeypatch.setenv(SIM_PIN_ENV_VAR, "1234")
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].response = b"+CPIN: SIM PUK\n\nOK\n"
+
+        with pytest.raises(SimPukRequiredError):
+            modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r"]
+
+    def test_unrecognized_status_raises(self, fake_serials):
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].response = b"garbled\n"
+
+        with pytest.raises(SimStatusUnknownError):
+            modem.unlock_sim()
+
+    def test_pin_not_configured_raises_and_does_not_send_a_pin(self, fake_serials, monkeypatch):
+        monkeypatch.delenv(SIM_PIN_ENV_VAR, raising=False)
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].response = b"+CPIN: SIM PIN\n\nOK\n"
+
+        with pytest.raises(SimPinNotConfiguredError):
+            modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r"]
+
+    def test_correct_pin_unlocks(self, fake_serials, monkeypatch):
+        monkeypatch.setenv(SIM_PIN_ENV_VAR, "1234")
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].responses = [
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"OK\n",
+            b"+CPIN: READY\n\nOK\n",
+        ]
+
+        modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r", b'AT+CPIN="1234"\r', b"AT+CPIN?\r"]
+
+    def test_wrong_pin_is_rejected_and_never_retried(self, fake_serials, monkeypatch):
+        monkeypatch.setenv(SIM_PIN_ENV_VAR, "0000")
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].responses = [
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"+CME ERROR: 16\n",
+        ]
+
+        with pytest.raises(SimPinRejectedError):
+            modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r", b'AT+CPIN="0000"\r']
+
+    def test_ambiguous_response_after_sending_pin_raises(self, fake_serials, monkeypatch):
+        monkeypatch.setenv(SIM_PIN_ENV_VAR, "1234")
+        modem = self._open_modem(fake_serials)
+        fake_serials[0].responses = [
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"",
+        ]
+
+        with pytest.raises(SimStatusUnknownError):
+            modem.unlock_sim()
+
+        assert fake_serials[0].written == [b"AT+CPIN?\r", b'AT+CPIN="1234"\r']
+
+    def test_never_reaching_ready_raises_without_resending_the_pin(self, fake_serials, monkeypatch):
+        monkeypatch.setenv(SIM_PIN_ENV_VAR, "1234")
+        poll_attempts = 3
+        modem = Quectel(make_config(sim_unlock_poll_attempts=poll_attempts))
+        modem.open()
+        fake_serials[0].responses = [
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"OK\n",
+        ] + [b"+CPIN: SIM PIN\n\nOK\n"] * poll_attempts
+
+        with pytest.raises(SimStatusUnknownError):
+            modem.unlock_sim()
+
+        pin_sends = [w for w in fake_serials[0].written if w.startswith(b'AT+CPIN="')]
+        assert pin_sends == [b'AT+CPIN="1234"\r']
+
+    def test_poll_attempts_are_configurable(self, fake_serials, monkeypatch):
+        monkeypatch.setenv(SIM_PIN_ENV_VAR, "1234")
+        modem = Quectel(make_config(sim_unlock_poll_attempts=2))
+        modem.open()
+        fake_serials[0].responses = [
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"OK\n",
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"+CPIN: READY\n\nOK\n",
+        ]
+
+        modem.unlock_sim()
+
+        status_queries = [w for w in fake_serials[0].written if w == b"AT+CPIN?\r"]
+        assert len(status_queries) == 3  # initial check + 2 polls
+
+    def test_pin_env_var_name_is_configurable(self, fake_serials, monkeypatch):
+        monkeypatch.setenv("ALTERNATE_SIM_PIN_VAR", "5678")
+        modem = Quectel(make_config(sim_pin_env_var="ALTERNATE_SIM_PIN_VAR"))
+        modem.open()
+        fake_serials[0].responses = [
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"OK\n",
+            b"+CPIN: READY\n\nOK\n",
+        ]
+
+        modem.unlock_sim()
+
+        assert b'AT+CPIN="5678"\r' in fake_serials[0].written
+
+    def test_poll_interval_is_configurable(self, fake_serials, monkeypatch):
+        sleeps: list[float] = []
+        monkeypatch.setattr("measurement_software.modems.quectel.time.sleep", sleeps.append)
+        monkeypatch.setenv(SIM_PIN_ENV_VAR, "1234")
+        modem = Quectel(make_config(sim_unlock_poll_interval=2.5))
+        modem.open()
+        fake_serials[0].responses = [
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"OK\n",
+            b"+CPIN: SIM PIN\n\nOK\n",
+            b"+CPIN: READY\n\nOK\n",
+        ]
+
+        modem.unlock_sim()
+
+        assert 2.5 in sleeps
 
 
 class TestPowerDown:
