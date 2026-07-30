@@ -360,6 +360,52 @@ class TestCollect:
         heartbeat.stop.assert_called_once()
 
 
+class TestMovementRecord:
+    def test_reports_nothing_before_the_first_capture(self, clock, keep_alive_mock, run_status, heartbeat, run_log, device):
+        gnss = FakeGNSSReceiver(fixes=[], clock=clock)
+        config = CollectorConfig(max_wait_for_first_fix=2.5, wait_log_interval=100)
+        collector = Collector(FakeModem(), gnss, config, run_status, heartbeat, run_log, device)
+
+        collector.collect()
+
+        assert collector.movement.latest() is None
+
+    def test_publishes_the_fix_of_every_genuine_movement(self, clock, keep_alive_mock, run_status, heartbeat, run_log, device):
+        pos_a = Position(latitude=0.0, longitude=0.0)
+        pos_a_nearby = Position(latitude=NORTH_5M, longitude=0.0)
+        pos_b = Position(latitude=NORTH_1KM, longitude=0.0)
+        fixes = [
+            GNSSFix(position=pos_a, num_satellites=8),
+            GNSSFix(position=pos_a_nearby, num_satellites=8),
+            GNSSFix(position=pos_b, num_satellites=8),
+        ]
+        gnss = FakeGNSSReceiver(fixes=fixes, clock=clock)
+        config = CollectorConfig(max_idle_time=3.0, max_wait_for_first_fix=1000, wait_log_interval=1000)
+        collector = Collector(FakeModem(), gnss, config, run_status, heartbeat, run_log, device)
+
+        collector.collect()
+
+        # The nearby fix is below the movement threshold, so B is the last movement published.
+        assert collector.movement.latest().fix.position == pos_b
+
+    def test_a_gps_disabled_run_reads_as_continuously_moving(self, clock, keep_alive_mock, run_status, heartbeat, run_log, device):
+        pos_a = Position(latitude=0.0, longitude=0.0)
+        fixes = [GNSSFix(position=pos_a, num_satellites=0, placeholder=True)]
+        gnss = FakeGNSSReceiver(fixes=fixes, clock=clock, seconds_per_read=0.0)
+        config = CollectorConfig(
+            gps_enabled=False,
+            gps_disabled_poll_interval_s=1.0,
+            max_idle_time=2.0,
+            max_wait_for_first_fix=1000,
+            wait_log_interval=1000,
+        )
+        collector = Collector(FakeModem(), gnss, config, run_status, heartbeat, run_log, device)
+
+        collector.collect()
+
+        assert collector.movement.latest().fix.placeholder is True
+
+
 class TestDurability:
     def test_each_capture_reaches_disk_before_the_next_one_is_taken(
             self, clock, keep_alive_mock, run_status, heartbeat, run_log, device):
