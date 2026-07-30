@@ -17,6 +17,11 @@ port = "/dev/serial0"
 baud_rate = 9600
 timeout = 1.0
 
+# device_id is omitted here - it defaults to this Pi's hostname, which is already distinct
+# per device in a fleet. Set it explicitly only to override that.
+[device]
+mission_type = "ground"
+
 [collector]
 position_threshold = 15
 max_idle_time = 200

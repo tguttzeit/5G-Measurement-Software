@@ -9,5 +9,7 @@ class Datapoint:
     """A single cell-info sample paired with the GNSS fix and timestamp it was captured at."""
 
     timestamp: str
+    device_id: str
+    mission_type: str
     fix: GNSSFix
     cell_sample: CellSample

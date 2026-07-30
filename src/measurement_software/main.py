@@ -50,7 +50,9 @@ def main() -> AppConfig:
         run_status = RunStatusTracker(config.run_status)
         storage_status = StorageStatusReporter(upload_dir, config.storage)
         heartbeat = HeartbeatSender(config.heartbeat, run_status, storage_status)
-        collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat, RunLog(upload_dir))
+        collector = Collector(
+            modem, gnss_receiver, config.collector, run_status, heartbeat, RunLog(upload_dir), config.device
+        )
         uploader = Uploader(config.uploader)
 
         display = create_display(config.display)

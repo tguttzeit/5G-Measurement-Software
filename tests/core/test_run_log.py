@@ -20,7 +20,13 @@ from measurement_software.modems.modem import CellSample
 
 def make_datapoint(rat: str = "LTE", latitude: float = 1.0) -> Datapoint:
     fix = GNSSFix(position=Position(latitude=latitude, longitude=2.0, altitude=3.0), num_satellites=7)
-    return Datapoint(timestamp="2026-07-27T00:00:00Z", fix=fix, cell_sample=CellSample(rat=rat))
+    return Datapoint(
+        timestamp="2026-07-27T00:00:00Z",
+        device_id="test-device",
+        mission_type="ground",
+        fix=fix,
+        cell_sample=CellSample(rat=rat),
+    )
 
 
 def read_lines(path: Path) -> list[dict]:

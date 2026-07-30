@@ -5,7 +5,7 @@ from math import radians, sin, cos, asin, sqrt
 from pathlib import Path
 from typing import Iterator
 
-from measurement_software.core.config import CollectorConfig
+from measurement_software.core.config import CollectorConfig, DeviceConfig
 from measurement_software.core.datapoint import Datapoint
 from measurement_software.core.heartbeat_sender import HeartbeatSender
 from measurement_software.core.keep_modem_alive_sender import KeepModemAliveSender
@@ -19,13 +19,16 @@ class Collector:
     """Runs a GPS-triggered measurement session, sampling the modem whenever the device moves."""
 
     def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig,
-                 run_status: RunStatusTracker, heartbeat: HeartbeatSender, run_log: RunLog):
+                 run_status: RunStatusTracker, heartbeat: HeartbeatSender, run_log: RunLog,
+                 device: DeviceConfig):
         self._logger = logging.getLogger(__name__)
         self._modem = modem
         self._gnss_receiver = gnss_receiver
         self._run_status = run_status
         self._heartbeat = heartbeat
         self._run_log = run_log
+        self._device_id = device.device_id
+        self._mission_type = device.mission_type
 
         self._position_threshold = config.position_threshold
         self._max_idle_time = config.max_idle_time
@@ -169,7 +172,16 @@ class Collector:
         samples = self._modem.query_cell_info()
         self._run_status.record_capture(samples)
 
-        datapoints = [Datapoint(timestamp=timestamp, fix=fix, cell_sample=sample) for sample in samples]
+        datapoints = [
+            Datapoint(
+                timestamp=timestamp,
+                device_id=self._device_id,
+                mission_type=self._mission_type,
+                fix=fix,
+                cell_sample=sample,
+            )
+            for sample in samples
+        ]
         for datapoint in datapoints:
             self._logger.debug("Datapoint captured: %s", datapoint)
         return datapoints
