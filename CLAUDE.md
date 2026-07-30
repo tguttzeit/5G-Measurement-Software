@@ -135,11 +135,13 @@ README for format. This is separate from the issue itself: the issue tracks what
 decision record captures how/why a specific approach was chosen. Add one whenever a real trade-off
 was discussed and resolved, not for every issue.
 
-## Autonomous work on `claude-ready` issues
+## Autonomous work on approved issues
 
-An issue labeled `claude-ready` has been explicitly approved by the maintainer to be picked up and
-implemented autonomously (e.g. so it can be kicked off and checked on later from a phone). For such
-an issue:
+An issue **assigned to `tguttzeit-claude`** has been explicitly approved by the maintainer to be
+picked up and implemented autonomously (e.g. so it can be kicked off and checked on later from a
+phone). This replaced an earlier `claude-ready` label-based convention — the label may still appear
+on older or newly-drafted issues for triage purposes, but the assignee is what actually gates
+whether a routine is created for it. For such an issue:
 
 - Create a branch named `<issue-id>-<issue_title_with_underscores_instead_of_spaces>` (e.g. issue
   12, "Handle transient serial connector failures" → `12-handle_transient_serial_connector_failures`).
