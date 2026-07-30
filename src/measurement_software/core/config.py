@@ -78,6 +78,20 @@ class HeartbeatConfig:
     timeout_s: float = 10.0
 
 @dataclass
+class FanConfig:
+    """Case fan on/off control via GPIO, driven by CPU temperature with hysteresis.
+
+    Disabled by default. Two distinct thresholds avoid rapidly toggling the fan right at a
+    single boundary as temperature hovers around it.
+    """
+
+    enabled: bool = False
+    gpio_pin: int = 27
+    temp_on_celsius: float = 70.0
+    temp_off_celsius: float = 60.0
+    poll_interval_s: float = 5.0
+
+@dataclass
 class DisplayConfig:
     """SSD1306 OLED status-display settings, for field diagnostics with no terminal attached.
 
@@ -128,6 +142,7 @@ class AppConfig:
     collector: CollectorConfig
     run_status: RunStatusConfig
     heartbeat: HeartbeatConfig
+    fan: FanConfig
     display: DisplayConfig
     uploader: UploaderConfig
     logging: LoggingConfig
@@ -143,6 +158,7 @@ def load_config(path: Path) -> AppConfig:
         collector=CollectorConfig(**raw.get("collector", {})),
         run_status=_build_run_status_config(raw.get("run_status", {})),
         heartbeat=HeartbeatConfig(**raw.get("heartbeat", {})),
+        fan=FanConfig(**raw.get("fan", {})),
         display=DisplayConfig(**raw.get("display", {})),
         uploader=UploaderConfig(**raw["uploader"]),
         logging=LoggingConfig(**raw.get("logging", {})),
