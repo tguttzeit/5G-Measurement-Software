@@ -74,6 +74,20 @@ class HeartbeatConfig:
     timeout_s: float = 10.0
 
 @dataclass
+class DisplayConfig:
+    """SSD1306 OLED status-display settings, for field diagnostics with no terminal attached.
+
+    Optional and disabled by default: an absent [display] section, or enabled=false, uses a
+    no-op display so the app runs unchanged without a screen attached.
+    """
+
+    enabled: bool = False
+    type: str = "ssd1306"
+    i2c_port: int = 1
+    i2c_address: int = 0x3C
+    refresh_interval_s: float = 2.0
+
+@dataclass
 class UploaderConfig:
     """Local storage and scp destination settings for uploading saved measurements."""
 
@@ -110,6 +124,7 @@ class AppConfig:
     collector: CollectorConfig
     run_status: RunStatusConfig
     heartbeat: HeartbeatConfig
+    display: DisplayConfig
     uploader: UploaderConfig
     logging: LoggingConfig
     system: SystemConfig
@@ -124,6 +139,7 @@ def load_config(path: Path) -> AppConfig:
         collector=CollectorConfig(**raw.get("collector", {})),
         run_status=_build_run_status_config(raw.get("run_status", {})),
         heartbeat=HeartbeatConfig(**raw.get("heartbeat", {})),
+        display=DisplayConfig(**raw.get("display", {})),
         uploader=UploaderConfig(**raw["uploader"]),
         logging=LoggingConfig(**raw.get("logging", {})),
         system=SystemConfig(**raw.get("system", {})),
