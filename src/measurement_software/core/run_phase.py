@@ -6,6 +6,7 @@ class RunPhase:
     state machine, its states become this holder's source instead: callers change what they
     set here, not how the display reads it.
     """
+    # TODO: swap for #7's lifecycle state machine once it exists (see docs/decisions/0017).
 
     def __init__(self, initial: str = "starting up"):
         self._label = initial

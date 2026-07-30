@@ -7,6 +7,7 @@ from measurement_software.core.collector import Collector
 from measurement_software.core.config import load_config, AppConfig
 from measurement_software.core.heartbeat_sender import HeartbeatSender
 from measurement_software.core.logging_setup import setup_logging
+from measurement_software.core.run_log import RunLog, discard_stale_temp_files, finalize, recover_unfinalized
 from measurement_software.core.run_phase import RunPhase
 from measurement_software.core.run_status import RunStatusTracker
 from measurement_software.core.status_display_updater import StatusDisplayUpdater
@@ -33,6 +34,7 @@ def main() -> AppConfig:
     if config.system.running_on_pi:
         setup_gpio(config.system.shutdown_gpio)
 
+    upload_dir = Path(config.uploader.upload_dir)
     modem = create_modem(config.modem)
     gnss_receiver = (
         create_gnss_receiver(config.gnss_receiver)
@@ -41,7 +43,7 @@ def main() -> AppConfig:
     )
     run_status = RunStatusTracker(config.run_status)
     heartbeat = HeartbeatSender(config.heartbeat, run_status)
-    collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat)
+    collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat, RunLog(upload_dir))
     uploader = Uploader(config.uploader)
 
     display = create_display(config.display)
@@ -52,14 +54,16 @@ def main() -> AppConfig:
     status_display.start()
     try:
         run_phase.set("uploading pending data")
+        discard_stale_temp_files(upload_dir)
+        recover_unfinalized(upload_dir)
         uploader.upload_pending_files()
         log_ip_addrs(config.system.network_interfaces)
 
         run_phase.set("collecting")
-        datapoints = collector.collect()
+        run_log_path = collector.collect()
 
-        run_phase.set("saving and uploading")
-        uploader.save_datapoints(datapoints)
+        run_phase.set("finalizing and uploading")
+        finalize(run_log_path)
         uploader.upload_pending_files()
 
         run_phase.set("done")

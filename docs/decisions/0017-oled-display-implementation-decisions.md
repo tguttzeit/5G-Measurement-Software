@@ -1,4 +1,4 @@
-# 0016 — OLED display implementation decisions
+# 0017 — OLED display implementation decisions
 
 ## Context
 
@@ -15,8 +15,8 @@ that weren't settled by 0006 and needed a call before writing code.
 content against) is still open — there is no state machine yet to read from. Rather than block
 this issue on #7 or invent #7's state names ahead of that issue actually being scoped, this adds
 `RunPhase`: a plain mutable holder for a phase label, defaulting to `"starting up"`, that `main.py`
-sets at each of its existing transitions (`"uploading pending data"`, `"collecting"`, `"saving and
-uploading"`, `"done"`) - i.e. today's real linear flow, worded plainly rather than borrowing #7's
+sets at each of its existing transitions (`"uploading pending data"`, `"collecting"`, `"finalizing
+and uploading"`, `"done"`) - i.e. today's real linear flow, worded plainly rather than borrowing #7's
 future state names for states that don't exist yet. The `Display`/content-builder side only ever
 sees `RunPhase.get()`, a plain string, so nothing about the display's design or `StatusDisplayUpdater`
 needs to change once #7 lands - only what calls `RunPhase.set()` does.
