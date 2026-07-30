@@ -61,6 +61,24 @@ min_sinr = 0.0
 [storage]
 low_free_space_warning_bytes = 500_000_000
 
+# Case fan on/off control via GPIO, based on CPU temperature with hysteresis. Disabled by
+# default. gpio_pin uses BCM numbering, same as system.shutdown_gpio.
+[fan]
+enabled = false
+gpio_pin = 27
+temp_on_celsius = 70.0
+temp_off_celsius = 60.0
+poll_interval_s = 5.0
+
+# Small SSD1306 OLED status display over I2C, for field diagnostics with no terminal attached.
+# Disabled by default so the app runs unchanged without a screen attached.
+[display]
+enabled = false
+type = "ssd1306"
+i2c_port = 1
+i2c_address = 0x3C
+refresh_interval_s = 2.0
+
 [uploader]
 upload_dir = "/home/admin/Logger/upload_queue"
 upload_user = "tim"

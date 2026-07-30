@@ -42,7 +42,8 @@ There is no `[project.scripts]` entry point; the app is only run via `python -m 
 
 **Entry point**: `src/measurement_software/main.py::main()` — loads `config.toml` (repo root, found
 via `Path(__file__)`, not cwd), sets up logging, builds a `Modem` and `GNSSReceiver` via factories,
-runs one `Collector.collect()` cycle, uploads results via `Uploader`, and (if
+recovers anything a previous run left unfinalized, runs one `Collector.collect()` cycle, finalizes
+that run's log, uploads results via `Uploader`, and (if
 `system.running_on_pi`) signals completion over GPIO. `if __name__ == "__main__"` then calls
 `perform_shutdown()` to power down the modem and run `sudo shutdown -h now` — this only fires when
 run as a script, not when `main()` is called directly (e.g. from tests).
@@ -67,14 +68,25 @@ registered implementations are `Quectel` (`modems/quectel.py`) and `NMEASerial`
 **Collection loop** (`core/collector.py::Collector`): waits for a first GPS fix, then on each
 subsequent fix computes haversine distance from the last captured position; if it clears
 `position_threshold`, queries the modem and pairs each `CellSample` with the `GNSSFix` + timestamp
-as a `Datapoint`. The session ends once there's no qualifying movement for `max_idle_time` seconds,
-or if no fix arrives at all within `max_wait_for_first_fix`. A background UDP heartbeat
+as a `Datapoint` appended to the run log. The session ends once there's no qualifying movement for
+`max_idle_time` seconds, or if no fix arrives at all within `max_wait_for_first_fix`; `collect()`
+returns the path of the run log it wrote. A background UDP heartbeat
 (`core/keep_modem_alive_sender.py::KeepModemAliveSender`, its own thread) runs for the duration of
 collection to keep the modem's link alive.
 
-**Uploader** (`core/uploader.py`): `save_datapoints()` writes a timestamped JSON file into
-`upload_dir`. `upload_pending_files()` scp's every pending `*.json` file to the remote host, but
-only if `wlan0` or `wwan0` has an IPv4 address; a file is deleted locally only after a successful
+**Power-loss durability** (`core/run_log.py`, `core/atomic_file.py`): per
+[ADR 0003](docs/decisions/0003-power-loss-durability.md), datapoints are never held for a whole run
+in memory. `RunLog` appends each capture as one JSON object per line to a per-run
+`gps_5g_<timestamp>.jsonl` in `upload_dir` and fsyncs it, so an interrupted append can only ever
+lose the last, incomplete line. `finalize()` converts that log into the unchanged `*.json` array
+format the uploader ships, written atomically (temp file in the same directory + `os.replace()` +
+fsync of file and directory), and removes the log only afterwards. `recover_unfinalized()` and
+`discard_stale_temp_files()` run at startup to clean up after a run that was cut short; the `*.jsonl`
+and `*.json.tmp` names deliberately don't match `upload_pending_files()`'s `*.json` glob, so
+in-progress data can never be uploaded.
+
+**Uploader** (`core/uploader.py`): `upload_pending_files()` scp's every pending `*.json` file to the
+remote host, but only if `wlan0` or `wwan0` has an IPv4 address; a file is deleted locally only after a successful
 transfer, so failures just leave it for the next run. `debug_upload` additionally binds the scp
 connection to `wwan0`'s IP (for testing over the cellular link itself) and adds `-vv`.
 
@@ -123,11 +135,13 @@ README for format. This is separate from the issue itself: the issue tracks what
 decision record captures how/why a specific approach was chosen. Add one whenever a real trade-off
 was discussed and resolved, not for every issue.
 
-## Autonomous work on `claude-ready` issues
+## Autonomous work on approved issues
 
-An issue labeled `claude-ready` has been explicitly approved by the maintainer to be picked up and
-implemented autonomously (e.g. so it can be kicked off and checked on later from a phone). For such
-an issue:
+An issue **assigned to `tguttzeit-claude`** has been explicitly approved by the maintainer to be
+picked up and implemented autonomously (e.g. so it can be kicked off and checked on later from a
+phone). This replaced an earlier `claude-ready` label-based convention — the label may still appear
+on older or newly-drafted issues for triage purposes, but the assignee is what actually gates
+whether a routine is created for it. For such an issue:
 
 - Create a branch named `<issue-id>-<issue_title_with_underscores_instead_of_spaces>` (e.g. issue
   12, "Handle transient serial connector failures" → `12-handle_transient_serial_connector_failures`).
