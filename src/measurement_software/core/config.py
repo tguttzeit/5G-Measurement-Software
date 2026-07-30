@@ -11,6 +11,8 @@ class ModemConfig:
     baud_rate: int
     timeout: float
     mode: str = "serving_cell"
+    retries: int = 3
+    retry_delay_s: float = 0.75
     sim_pin_env_var: str = "MODEM_SIM_PIN"
     sim_unlock_poll_attempts: int = 10
     sim_unlock_poll_interval: float = 1.0
@@ -23,6 +25,8 @@ class GnssConfig:
     port: str
     baud_rate: int
     timeout: float
+    retries: int = 3
+    retry_delay_s: float = 0.75
 
 @dataclass
 class CollectorConfig:
@@ -88,6 +92,20 @@ class FanConfig:
     poll_interval_s: float = 5.0
 
 @dataclass
+class DisplayConfig:
+    """SSD1306 OLED status-display settings, for field diagnostics with no terminal attached.
+
+    Optional and disabled by default: an absent [display] section, or enabled=false, uses a
+    no-op display so the app runs unchanged without a screen attached.
+    """
+
+    enabled: bool = False
+    type: str = "ssd1306"
+    i2c_port: int = 1
+    i2c_address: int = 0x3C
+    refresh_interval_s: float = 2.0
+
+@dataclass
 class UploaderConfig:
     """Local storage and scp destination settings for uploading saved measurements."""
 
@@ -125,6 +143,7 @@ class AppConfig:
     run_status: RunStatusConfig
     heartbeat: HeartbeatConfig
     fan: FanConfig
+    display: DisplayConfig
     uploader: UploaderConfig
     logging: LoggingConfig
     system: SystemConfig
@@ -140,6 +159,7 @@ def load_config(path: Path) -> AppConfig:
         run_status=_build_run_status_config(raw.get("run_status", {})),
         heartbeat=HeartbeatConfig(**raw.get("heartbeat", {})),
         fan=FanConfig(**raw.get("fan", {})),
+        display=DisplayConfig(**raw.get("display", {})),
         uploader=UploaderConfig(**raw["uploader"]),
         logging=LoggingConfig(**raw.get("logging", {})),
         system=SystemConfig(**raw.get("system", {})),

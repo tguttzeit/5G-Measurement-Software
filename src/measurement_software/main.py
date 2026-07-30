@@ -9,8 +9,11 @@ from measurement_software.core.fan_controller import FanController
 from measurement_software.core.heartbeat_sender import HeartbeatSender
 from measurement_software.core.logging_setup import setup_logging
 from measurement_software.core.run_log import RunLog, discard_stale_temp_files, finalize, recover_unfinalized
+from measurement_software.core.run_phase import RunPhase
 from measurement_software.core.run_status import RunStatusTracker
+from measurement_software.core.status_display_updater import StatusDisplayUpdater
 from measurement_software.core.uploader import Uploader
+from measurement_software.displays import create_display
 from measurement_software.gnss import create_gnss_receiver
 from measurement_software.gnss.null_gnss_receiver import NullGNSSReceiver
 from measurement_software.modems import create_modem
@@ -48,16 +51,32 @@ def main() -> AppConfig:
         collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat, RunLog(upload_dir))
         uploader = Uploader(config.uploader)
 
-        discard_stale_temp_files(upload_dir)
-        recover_unfinalized(upload_dir)
-        uploader.upload_pending_files()
-        log_ip_addrs(config.system.network_interfaces)
+        display = create_display(config.display)
+        run_phase = RunPhase()
+        status_display = StatusDisplayUpdater(display, run_phase, run_status, config.collector, config.display)
 
-        finalize(collector.collect())
-        uploader.upload_pending_files()
+        display.open()
+        status_display.start()
+        try:
+            run_phase.set("uploading pending data")
+            discard_stale_temp_files(upload_dir)
+            recover_unfinalized(upload_dir)
+            uploader.upload_pending_files()
+            log_ip_addrs(config.system.network_interfaces)
 
-        if config.system.running_on_pi:
-            signal_completion(config.system.shutdown_gpio)
+            run_phase.set("collecting")
+            run_log_path = collector.collect()
+
+            run_phase.set("finalizing and uploading")
+            finalize(run_log_path)
+            uploader.upload_pending_files()
+
+            run_phase.set("done")
+            if config.system.running_on_pi:
+                signal_completion(config.system.shutdown_gpio)
+        finally:
+            status_display.stop()
+            display.close()
     finally:
         fan_controller.stop()
 

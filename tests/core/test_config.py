@@ -46,9 +46,49 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.fan.temp_on_celsius == 70.0
     assert config.fan.temp_off_celsius == 60.0
     assert config.fan.poll_interval_s == 5.0
+    assert config.display.enabled is False
+    assert config.display.type == "ssd1306"
+    assert config.display.i2c_port == 1
+    assert config.display.i2c_address == 0x3C
+    assert config.display.refresh_interval_s == 2.0
     assert config.logging.level == "INFO"
     assert config.system.running_on_pi is True
     assert config.system.network_interfaces == ("wlan0", "wwan0")
+    assert config.modem.retries == 3
+    assert config.modem.retry_delay_s == 0.75
+    assert config.gnss_receiver.retries == 3
+    assert config.gnss_receiver.retry_delay_s == 0.75
+
+
+def test_load_config_overrides_serial_retry_settings(tmp_path):
+    content = """
+[modem]
+type = "quectel"
+port = "/dev/ttyUSB2"
+baud_rate = 115200
+timeout = 1.0
+retries = 5
+retry_delay_s = 1.0
+
+[gnss_receiver]
+type = "quectel"
+port = "/dev/ttyUSB3"
+baud_rate = 9600
+timeout = 1.0
+retries = 1
+retry_delay_s = 0.5
+
+[uploader]
+upload_dir = "/data/uploads"
+upload_user = "pi"
+upload_host = "example.org"
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.modem.retries == 5
+    assert config.modem.retry_delay_s == 1.0
+    assert config.gnss_receiver.retries == 1
+    assert config.gnss_receiver.retry_delay_s == 0.5
 
 
 def test_load_config_overrides_defaults_when_optional_sections_present(tmp_path):
@@ -106,6 +146,23 @@ poll_interval_s = 2.0
     assert config.fan.temp_on_celsius == 75.0
     assert config.fan.temp_off_celsius == 65.0
     assert config.fan.poll_interval_s == 2.0
+
+
+def test_load_config_reads_display_section(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[display]
+enabled = true
+i2c_port = 3
+i2c_address = 0x3D
+refresh_interval_s = 5.0
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.display.enabled is True
+    assert config.display.type == "ssd1306"
+    assert config.display.i2c_port == 3
+    assert config.display.i2c_address == 0x3D
+    assert config.display.refresh_interval_s == 5.0
 
 
 def test_load_config_reads_per_rat_quality_thresholds(tmp_path):

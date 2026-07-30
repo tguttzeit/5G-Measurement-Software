@@ -4,6 +4,7 @@ import time
 import serial
 
 from measurement_software.core.config import ModemConfig
+from measurement_software.core.serial_retry import read_with_retry
 from measurement_software.modems.modem import (
     Modem,
     CellSample,
@@ -37,6 +38,8 @@ class Quectel(Modem):
         self._baud_rate = config.baud_rate
         self._timeout = config.timeout
         self._mode = QuectelMode(config.mode)
+        self._retries = config.retries
+        self._retry_delay_s = config.retry_delay_s
         self._sim_pin_env_var = config.sim_pin_env_var
         self._sim_unlock_poll_attempts = config.sim_unlock_poll_attempts
         self._sim_unlock_poll_interval = config.sim_unlock_poll_interval
@@ -130,15 +133,26 @@ class Quectel(Modem):
     def _query_serving_cell(self) -> list[CellSample]:
         self._connection.write(b'AT+QENG="servingcell"\r')
         time.sleep(0.5)
-        resp = self._connection.read_all().decode(errors="ignore")
+        resp = self._read_response()
         return self._parse_qeng_response(resp)
 
     def _query_sa_scan(self) -> list[CellSample]:
         self._logger.info("Running AT+QSCAN=1,1 (NR5G-SA-only scan)")
         self._connection.write(b'AT+QSCAN=1,1\r')
         time.sleep(7)
-        resp = self._connection.read_all().decode(errors="ignore")
+        resp = self._read_response()
         return self._parse_qscan_response(resp)
+
+    def _read_response(self) -> str:
+        """Reads the AT command response, retrying a transient short/empty read."""
+        raw = read_with_retry(
+            self._connection.read_all,
+            is_transient=lambda b: not b,
+            retries=self._retries,
+            delay_s=self._retry_delay_s,
+            logger=self._logger,
+        )
+        return raw.decode(errors="ignore")
 
     def _parse_qeng_response(self, response: str) -> list[CellSample]:
         """Parses an AT+QENG="servingcell" response into CellSamples, skipping the header echo."""
