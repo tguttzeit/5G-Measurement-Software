@@ -5,6 +5,7 @@ from pathlib import Path
 
 from measurement_software.core.collector import Collector
 from measurement_software.core.config import load_config, AppConfig
+from measurement_software.core.datapoint import Datapoint
 from measurement_software.core.fan_controller import FanController
 from measurement_software.core.heartbeat_sender import HeartbeatSender
 from measurement_software.core.logging_setup import setup_logging
@@ -51,7 +52,8 @@ def main() -> AppConfig:
         storage_status = StorageStatusReporter(upload_dir, config.storage)
         heartbeat = HeartbeatSender(config.heartbeat, run_status, storage_status)
         collector = Collector(
-            modem, gnss_receiver, config.collector, run_status, heartbeat, RunLog(upload_dir), config.device
+            modem, gnss_receiver, config.collector, run_status, heartbeat,
+            RunLog[Datapoint](upload_dir), config.device,
         )
         uploader = Uploader(config.uploader)
 

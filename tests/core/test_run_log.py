@@ -98,6 +98,31 @@ class TestAppend:
             run_log.append([make_datapoint()])
 
 
+class TestSeparateLogs:
+    def test_a_prefix_gives_a_second_kind_of_measurement_its_own_log_and_upload_file(self, tmp_path):
+        other = RunLog(tmp_path, prefix="latency_")
+        other.open()
+        other.append([make_datapoint()])
+        other.close()
+
+        assert other.path.name.startswith("latency_")
+        assert finalize(other.path).name.startswith("latency_")
+
+    def test_logs_of_either_kind_are_recovered_after_a_run_that_never_finished(self, tmp_path):
+        write_run_log(tmp_path, [1.0])
+        other = RunLog(tmp_path, prefix="latency_")
+        other.open()
+        other.append([make_datapoint(latitude=2.0)])
+        other.close()
+
+        recovered = recover_unfinalized(tmp_path)
+
+        assert len(recovered) == 2
+        assert any(p.name.startswith(RUN_FILE_PREFIX) for p in recovered)
+        assert any(p.name.startswith("latency_") for p in recovered)
+        assert list(tmp_path.glob(f"*{RUN_LOG_SUFFIX}")) == []
+
+
 class TestDurability:
     def test_datapoints_are_on_disk_before_the_log_is_closed(self, run_log):
         # This is the whole point: a run that never gets to close() must still have

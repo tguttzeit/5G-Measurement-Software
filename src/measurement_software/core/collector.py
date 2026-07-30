@@ -20,7 +20,7 @@ class Collector:
     """Runs a GPS-triggered measurement session, sampling the modem whenever the device moves."""
 
     def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig,
-                 run_status: RunStatusTracker, heartbeat: HeartbeatSender, run_log: RunLog,
+                 run_status: RunStatusTracker, heartbeat: HeartbeatSender, run_log: RunLog[Datapoint],
                  device: DeviceConfig):
         self._logger = logging.getLogger(__name__)
         self._modem = modem
