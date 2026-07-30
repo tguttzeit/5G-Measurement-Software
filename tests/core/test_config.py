@@ -55,6 +55,18 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.display.i2c_port == 1
     assert config.display.i2c_address == 0x3C
     assert config.display.refresh_interval_s == 2.0
+    assert config.latency_test.enabled is False
+    assert config.latency_test.host == ""
+    assert config.latency_test.flent_binary == "flent"
+    assert config.latency_test.baseline_test == "ping"
+    assert config.latency_test.baseline_interval_s == 60.0
+    assert config.latency_test.baseline_length_s == 10
+    assert config.latency_test.load_test == "rrul"
+    assert config.latency_test.load_interval_s == 900.0
+    assert config.latency_test.load_length_s == 60
+    assert config.latency_test.poll_interval_s == 5.0
+    assert config.latency_test.movement_window_s == 30.0
+    assert config.latency_test.timeout_s == 300.0
     assert config.logging.level == "INFO"
     assert config.system.running_on_pi is True
     assert config.system.network_interfaces == ("wlan0", "wwan0")
@@ -183,6 +195,29 @@ refresh_interval_s = 5.0
     assert config.display.i2c_port == 3
     assert config.display.i2c_address == 0x3D
     assert config.display.refresh_interval_s == 5.0
+
+
+def test_load_config_reads_latency_test_section(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[latency_test]
+enabled = true
+host = "testserver.example.org"
+baseline_interval_s = 30.0
+load_test = "rrul_be"
+load_length_s = 45
+movement_window_s = 10.0
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.latency_test.enabled is True
+    assert config.latency_test.host == "testserver.example.org"
+    assert config.latency_test.baseline_interval_s == 30.0
+    assert config.latency_test.load_test == "rrul_be"
+    assert config.latency_test.load_length_s == 45
+    assert config.latency_test.movement_window_s == 10.0
+    # Settings the section leaves out keep their defaults.
+    assert config.latency_test.baseline_test == "ping"
+    assert config.latency_test.load_interval_s == 900.0
 
 
 def test_load_config_reads_per_rat_quality_thresholds(tmp_path):

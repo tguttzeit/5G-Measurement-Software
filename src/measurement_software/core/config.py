@@ -128,6 +128,32 @@ class DisplayConfig:
     refresh_interval_s: float = 2.0
 
 @dataclass
+class LatencyTestConfig:
+    """flent-based latency measurements against a test server, on two independent cadences.
+
+    Disabled by default, and inert without a host: the tests need a server-side counterpart
+    (netperf/irtt, depending on the test) that is outside this repo's control, so an
+    unconfigured device must never start generating test traffic on its own.
+
+    The two cadences are separate because the tests cost very different amounts: a baseline
+    ping is nearly free, while a load test deliberately saturates the link for its whole
+    length and spends real data and battery (see decision record 0004).
+    """
+
+    enabled: bool = False
+    host: str = ""
+    flent_binary: str = "flent"
+    baseline_test: str = "ping"
+    baseline_interval_s: float = 60.0
+    baseline_length_s: int = 10
+    load_test: str = "rrul"
+    load_interval_s: float = 900.0
+    load_length_s: int = 60
+    poll_interval_s: float = 5.0
+    movement_window_s: float = 30.0
+    timeout_s: float = 300.0
+
+@dataclass
 class UploaderConfig:
     """Local storage and scp destination settings for uploading saved measurements."""
 
@@ -168,6 +194,7 @@ class AppConfig:
     storage: StorageConfig
     fan: FanConfig
     display: DisplayConfig
+    latency_test: LatencyTestConfig
     uploader: UploaderConfig
     logging: LoggingConfig
     system: SystemConfig
@@ -186,6 +213,7 @@ def load_config(path: Path) -> AppConfig:
         storage=StorageConfig(**raw.get("storage", {})),
         fan=FanConfig(**raw.get("fan", {})),
         display=DisplayConfig(**raw.get("display", {})),
+        latency_test=LatencyTestConfig(**raw.get("latency_test", {})),
         uploader=UploaderConfig(**raw["uploader"]),
         logging=LoggingConfig(**raw.get("logging", {})),
         system=SystemConfig(**raw.get("system", {})),
