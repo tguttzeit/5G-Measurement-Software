@@ -1,6 +1,8 @@
 import socket
 from pathlib import Path
 
+import pytest
+
 from measurement_software.core.config import load_config
 
 REQUIRED_SECTIONS = """
@@ -202,3 +204,90 @@ min_sinr = 3.0
     # Thresholds not given for a RAT fall back to the defaults, per RAT independently.
     assert config.run_status.nr.min_rsrq == -11.0
     assert config.run_status.lte.min_rsrp == -100.0
+
+
+def test_load_config_raises_on_shutdown_and_fan_gpio_conflict(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[system]
+shutdown_gpio = 22
+
+[fan]
+enabled = true
+gpio_pin = 22
+"""
+    with pytest.raises(ValueError, match="GPIO pin conflict"):
+        load_config(write_config(tmp_path, content))
+
+
+def test_load_config_does_not_raise_on_fan_gpio_conflict_when_fan_disabled(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[system]
+shutdown_gpio = 22
+
+[fan]
+enabled = false
+gpio_pin = 22
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.system.shutdown_gpio == 22
+    assert config.fan.gpio_pin == 22
+
+
+def test_load_config_raises_on_shutdown_and_display_i2c_pin_conflict(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[system]
+shutdown_gpio = 2
+
+[display]
+enabled = true
+"""
+    with pytest.raises(ValueError, match="GPIO pin conflict"):
+        load_config(write_config(tmp_path, content))
+
+
+def test_load_config_raises_on_fan_and_display_i2c_pin_conflict(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[fan]
+enabled = true
+gpio_pin = 3
+
+[display]
+enabled = true
+"""
+    with pytest.raises(ValueError, match="GPIO pin conflict"):
+        load_config(write_config(tmp_path, content))
+
+
+def test_load_config_does_not_raise_on_display_i2c_pin_conflict_when_display_disabled(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[fan]
+enabled = true
+gpio_pin = 2
+
+[display]
+enabled = false
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.fan.gpio_pin == 2
+    assert config.display.enabled is False
+
+
+def test_load_config_allows_non_conflicting_fan_and_display_pins(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[system]
+shutdown_gpio = 17
+
+[fan]
+enabled = true
+gpio_pin = 27
+
+[display]
+enabled = true
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.system.shutdown_gpio == 17
+    assert config.fan.gpio_pin == 27
+    assert config.display.enabled is True

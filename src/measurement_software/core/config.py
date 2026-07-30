@@ -176,7 +176,7 @@ def load_config(path: Path) -> AppConfig:
     """Reads config.toml and builds an AppConfig, applying defaults for omitted optional sections."""
     with open(path, "rb") as f:
         raw = tomllib.load(f)
-    return AppConfig(
+    config = AppConfig(
         modem=ModemConfig(**raw["modem"]),
         gnss_receiver=GnssConfig(**raw["gnss_receiver"]),
         device=DeviceConfig(**raw.get("device", {})),
@@ -190,8 +190,30 @@ def load_config(path: Path) -> AppConfig:
         logging=LoggingConfig(**raw.get("logging", {})),
         system=SystemConfig(**raw.get("system", {})),
     )
+    _validate_gpio_pins(config)
+    return config
 
 def _build_run_status_config(raw: dict) -> RunStatusConfig:
     """Builds a RunStatusConfig, expanding its per-RAT sub-tables into QualityThresholds."""
     per_rat_thresholds = {rat: QualityThresholds(**raw.get(rat, {})) for rat in ("lte", "nr")}
     return RunStatusConfig(**(raw | per_rat_thresholds))
+
+def _validate_gpio_pins(config: AppConfig) -> None:
+    """Raises ValueError if two GPIO consumers are configured to use the same pin.
+
+    Per decision record 0010, this only checks GPIO consumers that exist today: the shutdown
+    signal, the fan (when enabled), and the display's fixed I2C pins (when enabled) - not a
+    general reservation system.
+    """
+    claims: dict[int, str] = {}
+    _claim_gpio_pin(claims, config.system.shutdown_gpio, "system.shutdown_gpio")
+    if config.fan.enabled:
+        _claim_gpio_pin(claims, config.fan.gpio_pin, "fan.gpio_pin")
+    if config.display.enabled:
+        _claim_gpio_pin(claims, 2, "display (I2C SDA1, fixed)")
+        _claim_gpio_pin(claims, 3, "display (I2C SCL1, fixed)")
+
+def _claim_gpio_pin(claims: dict[int, str], pin: int, owner: str) -> None:
+    if pin in claims:
+        raise ValueError(f"GPIO pin conflict: {owner} and {claims[pin]} both use pin {pin}")
+    claims[pin] = owner
