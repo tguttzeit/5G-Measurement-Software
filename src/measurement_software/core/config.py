@@ -11,6 +11,9 @@ class ModemConfig:
     baud_rate: int
     timeout: float
     mode: str = "serving_cell"
+    sim_pin_env_var: str = "MODEM_SIM_PIN"
+    sim_unlock_poll_attempts: int = 10
+    sim_unlock_poll_interval: float = 1.0
 
 @dataclass
 class GnssConfig:

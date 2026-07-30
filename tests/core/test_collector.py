@@ -79,6 +79,9 @@ class FakeModem(Modem):
     def close(self) -> None:
         self.closed = True
 
+    def unlock_sim(self) -> None:
+        pass
+
     def query_cell_info(self) -> list[CellSample]:
         self.query_count += 1
         if self._raise_on_call == self.query_count:
