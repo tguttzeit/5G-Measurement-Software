@@ -1,6 +1,7 @@
 import logging
 
 import pytest
+import serial
 
 from measurement_software.core.config import ModemConfig
 from measurement_software.modems.modem import (
@@ -25,12 +26,15 @@ class FakeSerial:
 
     `response` is returned for every read_all() call. For interactions with more than one
     write/read round trip, set `responses` instead - each read_all() pops the next entry.
+    `read_all_sequence`, if set, takes priority and scripts successive `read_all()` calls (an
+    entry that is an Exception is raised instead of returned).
     """
 
     def __init__(self, *args, response: bytes = b"", **kwargs):
         self.args = args
         self.kwargs = kwargs
         self.response = response
+        self.read_all_sequence: list[bytes | Exception] | None = None
         self.responses: list[bytes] = []
         self.written: list[bytes] = []
         self.closed = False
@@ -39,6 +43,11 @@ class FakeSerial:
         self.written.append(data)
 
     def read_all(self) -> bytes:
+        if self.read_all_sequence is not None:
+            item = self.read_all_sequence.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
         if self.responses:
             return self.responses.pop(0)
         return self.response
@@ -50,6 +59,7 @@ class FakeSerial:
 @pytest.fixture(autouse=True)
 def no_sleep(monkeypatch):
     monkeypatch.setattr("measurement_software.modems.quectel.time.sleep", lambda seconds: None)
+    monkeypatch.setattr("measurement_software.core.serial_retry.time.sleep", lambda seconds: None)
 
 
 @pytest.fixture
@@ -318,6 +328,51 @@ class TestQueryCellInfo:
 
         assert fake_serials[0].written == [b"AT+QSCAN=1,1\r"]
         assert [s.rat for s in samples] == ["NR5G-SA"]
+
+
+class TestQueryCellInfoRetry:
+    def test_recovers_from_a_transient_empty_read(self, fake_serials):
+        modem = Quectel(make_config(mode="serving_cell", retries=3))
+        modem.open()
+        fake_serials[0].read_all_sequence = [
+            b"",
+            '+QENG: "LTE","FDD",262,1,12345678,205,1650,3,50,50,8721,-95,-10,-70,15,10,23,3\n'.encode(),
+        ]
+
+        samples = modem.query_cell_info()
+
+        assert [s.rat for s in samples] == ["LTE"]
+
+    def test_recovers_from_a_transient_timeout_exception(self, fake_serials):
+        modem = Quectel(make_config(mode="serving_cell", retries=3))
+        modem.open()
+        fake_serials[0].read_all_sequence = [
+            serial.SerialTimeoutException("write timed out"),
+            '+QENG: "LTE","FDD",262,1,12345678,205,1650,3,50,50,8721,-95,-10,-70,15,10,23,3\n'.encode(),
+        ]
+
+        samples = modem.query_cell_info()
+
+        assert [s.rat for s in samples] == ["LTE"]
+
+    def test_device_gone_propagates_immediately_without_exhausting_retries(self, fake_serials):
+        modem = Quectel(make_config(mode="serving_cell", retries=3))
+        modem.open()
+        fake_serials[0].read_all_sequence = [serial.SerialException("device disconnected")]
+
+        with pytest.raises(serial.SerialException):
+            modem.query_cell_info()
+
+    def test_exhausting_retries_on_persistent_empty_read_yields_no_samples(self, fake_serials, caplog):
+        caplog.set_level(logging.WARNING)
+        modem = Quectel(make_config(mode="serving_cell", retries=2))
+        modem.open()
+        fake_serials[0].read_all_sequence = [b"", b""]
+
+        samples = modem.query_cell_info()
+
+        assert samples == []
+        assert "No QENG measurements found" in caplog.text
 
 
 class TestParseCpinResponse:
