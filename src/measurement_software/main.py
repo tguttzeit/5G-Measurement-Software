@@ -8,6 +8,7 @@ from measurement_software.core.config import load_config, AppConfig
 from measurement_software.core.fan_controller import FanController
 from measurement_software.core.heartbeat_sender import HeartbeatSender
 from measurement_software.core.logging_setup import setup_logging
+from measurement_software.core.run_log import RunLog, discard_stale_temp_files, finalize, recover_unfinalized
 from measurement_software.core.run_status import RunStatusTracker
 from measurement_software.core.uploader import Uploader
 from measurement_software.gnss import create_gnss_receiver
@@ -35,6 +36,7 @@ def main() -> AppConfig:
     fan_controller.start()
 
     try:
+        upload_dir = Path(config.uploader.upload_dir)
         modem = create_modem(config.modem)
         gnss_receiver = (
             create_gnss_receiver(config.gnss_receiver)
@@ -43,14 +45,15 @@ def main() -> AppConfig:
         )
         run_status = RunStatusTracker(config.run_status)
         heartbeat = HeartbeatSender(config.heartbeat, run_status)
-        collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat)
+        collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat, RunLog(upload_dir))
         uploader = Uploader(config.uploader)
 
+        discard_stale_temp_files(upload_dir)
+        recover_unfinalized(upload_dir)
         uploader.upload_pending_files()
         log_ip_addrs(config.system.network_interfaces)
 
-        datapoints = collector.collect()
-        uploader.save_datapoints(datapoints)
+        finalize(collector.collect())
         uploader.upload_pending_files()
 
         if config.system.running_on_pi:

@@ -178,6 +178,9 @@ class FakeModem(Modem):
         if self.fail_at == "close":
             raise RuntimeError("close failed")
 
+    def unlock_sim(self) -> None:
+        self.calls.append("unlock_sim")
+
     def query_cell_info(self) -> list[CellSample]:
         return []
 
