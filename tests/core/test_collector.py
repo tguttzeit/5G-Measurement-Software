@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -5,6 +7,7 @@ import pytest
 from measurement_software.core.collector import Collector
 from measurement_software.core.config import CollectorConfig, RunStatusConfig
 from measurement_software.core.heartbeat_sender import HeartbeatSender
+from measurement_software.core.run_log import RunLog
 from measurement_software.core.run_status import RunStatusTracker
 from measurement_software.gnss.gnss_receiver import GNSSReceiver, GNSSFix, Position
 from measurement_software.modems.modem import Modem, CellSample
@@ -110,6 +113,27 @@ def heartbeat() -> MagicMock:
 
 
 @pytest.fixture
+def run_log(tmp_path) -> RunLog:
+    return RunLog(tmp_path / "queue")
+
+
+def read_datapoints(run_log_path: Path) -> list[dict]:
+    """Reads back what the run actually persisted, rather than what it held in memory."""
+    return [json.loads(line) for line in run_log_path.read_text().splitlines()]
+
+
+def positions(run_log_path: Path) -> list[Position]:
+    return [
+        Position(
+            latitude=dp["fix"]["position"]["latitude"],
+            longitude=dp["fix"]["position"]["longitude"],
+            altitude=dp["fix"]["position"]["altitude"],
+        )
+        for dp in read_datapoints(run_log_path)
+    ]
+
+
+@pytest.fixture
 def keep_alive_mock(monkeypatch) -> MagicMock:
     mock_cls = MagicMock()
     monkeypatch.setattr("measurement_software.core.collector.KeepModemAliveSender", mock_cls)
@@ -133,15 +157,15 @@ class TestHaversine:
 
 
 class TestCollect:
-    def test_returns_empty_list_when_no_first_fix(self, clock, keep_alive_mock, run_status, heartbeat):
+    def test_records_nothing_when_no_first_fix(self, clock, keep_alive_mock, run_status, heartbeat, run_log):
         gnss = FakeGNSSReceiver(fixes=[], clock=clock)
         modem = FakeModem()
         config = CollectorConfig(max_wait_for_first_fix=2.5, wait_log_interval=100)
-        collector = Collector(modem, gnss, config, run_status, heartbeat)
+        collector = Collector(modem, gnss, config, run_status, heartbeat, run_log)
 
-        result = collector.collect()
+        run_log_path = collector.collect()
 
-        assert result == []
+        assert read_datapoints(run_log_path) == []
         assert modem.query_count == 0
         assert modem.opened and modem.closed
         assert gnss.opened and gnss.closed
@@ -150,7 +174,7 @@ class TestCollect:
         heartbeat.start.assert_called_once()
         heartbeat.stop.assert_called_once()
 
-    def test_filters_small_movements_and_stops_after_idle_timeout(self, clock, keep_alive_mock, run_status, heartbeat):
+    def test_filters_small_movements_and_stops_after_idle_timeout(self, clock, keep_alive_mock, run_status, heartbeat, run_log):
         pos_a = Position(latitude=0.0, longitude=0.0)
         pos_a_nearby = Position(latitude=NORTH_5M, longitude=0.0)
         pos_b = Position(latitude=NORTH_1KM, longitude=0.0)
@@ -168,36 +192,36 @@ class TestCollect:
             max_wait_for_first_fix=1000,
             wait_log_interval=1000,
         )
-        collector = Collector(modem, gnss, config, run_status, heartbeat)
+        collector = Collector(modem, gnss, config, run_status, heartbeat, run_log)
 
-        result = collector.collect()
+        run_log_path = collector.collect()
 
         # Only the two genuine movements (A, then B) should have produced datapoints;
         # the nearby fix and the repeated B fixes while idle are filtered out.
-        assert [dp.fix.position for dp in result] == [pos_a, pos_b]
+        assert positions(run_log_path) == [pos_a, pos_b]
         assert modem.query_count == 2
         keep_alive_mock.start.assert_called_once()
         keep_alive_mock.stop.assert_called_once()
         heartbeat.start.assert_called_once()
         heartbeat.stop.assert_called_once()
 
-    def test_datapoints_carry_modem_samples_and_fix(self, clock, keep_alive_mock, run_status, heartbeat):
+    def test_datapoints_carry_modem_samples_and_fix(self, clock, keep_alive_mock, run_status, heartbeat, run_log):
         pos_a = Position(latitude=0.0, longitude=0.0)
         fix_a = GNSSFix(position=pos_a, num_satellites=6)
         gnss = FakeGNSSReceiver(fixes=[fix_a], clock=clock)
         samples = [CellSample(rat="LTE"), CellSample(rat="NR5G-SA")]
         modem = FakeModem(samples=samples)
         config = CollectorConfig(max_idle_time=1.0, max_wait_for_first_fix=1000, wait_log_interval=1000)
-        collector = Collector(modem, gnss, config, run_status, heartbeat)
+        collector = Collector(modem, gnss, config, run_status, heartbeat, run_log)
 
-        result = collector.collect()
+        recorded = read_datapoints(collector.collect())
 
-        assert len(result) == 2
-        assert [dp.cell_sample for dp in result] == samples
-        assert all(dp.fix == fix_a for dp in result)
-        assert all(dp.timestamp.endswith("Z") for dp in result)
+        assert len(recorded) == 2
+        assert [dp["cell_sample"]["rat"] for dp in recorded] == [s.rat for s in samples]
+        assert all(dp["fix"]["num_satellites"] == fix_a.num_satellites for dp in recorded)
+        assert all(dp["timestamp"].endswith("Z") for dp in recorded)
 
-    def test_continues_past_intermittent_lost_fixes(self, clock, keep_alive_mock, run_status, heartbeat):
+    def test_continues_past_intermittent_lost_fixes(self, clock, keep_alive_mock, run_status, heartbeat, run_log):
         # A momentarily loses its fix (e.g. a non-GGA sentence) twice in a row
         # before GNSS recovers and later reports a genuine movement to B.
         pos_a = Position(latitude=0.0, longitude=0.0)
@@ -219,16 +243,16 @@ class TestCollect:
             max_wait_for_first_fix=1000,
             wait_log_interval=1000,
         )
-        collector = Collector(modem, gnss, config, run_status, heartbeat)
+        collector = Collector(modem, gnss, config, run_status, heartbeat, run_log)
 
-        result = collector.collect()
+        run_log_path = collector.collect()
 
         # The lost-fix reads must not produce datapoints or break the collection;
         # only the two genuine movements (A, then B) should be captured.
-        assert [dp.fix.position for dp in result] == [pos_a, pos_b]
+        assert positions(run_log_path) == [pos_a, pos_b]
         assert modem.query_count == 2
 
-    def test_records_every_capture_in_the_run_status(self, clock, keep_alive_mock, run_status, heartbeat):
+    def test_records_every_capture_in_the_run_status(self, clock, keep_alive_mock, run_status, heartbeat, run_log):
         fixes = [
             GNSSFix(position=Position(latitude=0.0, longitude=0.0), num_satellites=8),
             GNSSFix(position=Position(latitude=NORTH_5M, longitude=0.0), num_satellites=8),
@@ -237,7 +261,7 @@ class TestCollect:
         gnss = FakeGNSSReceiver(fixes=fixes, clock=clock)
         modem = FakeModem(samples=[CellSample(rat="LTE", rsrp=-80.0, rsrq=-8.0, sinr=12.0)])
         config = CollectorConfig(max_idle_time=3.0, max_wait_for_first_fix=1000, wait_log_interval=1000)
-        collector = Collector(modem, gnss, config, run_status, heartbeat)
+        collector = Collector(modem, gnss, config, run_status, heartbeat, run_log)
 
         collector.collect()
 
@@ -247,7 +271,7 @@ class TestCollect:
         assert status.pipeline_broken is False
 
     def test_run_status_reports_a_broken_pipeline_when_the_modem_yields_nothing(
-            self, clock, keep_alive_mock, run_status, heartbeat):
+            self, clock, keep_alive_mock, run_status, heartbeat, run_log):
         moving_fixes = [
             GNSSFix(position=Position(latitude=NORTH_1KM * step, longitude=0.0), num_satellites=8)
             for step in range(4)
@@ -255,16 +279,16 @@ class TestCollect:
         gnss = FakeGNSSReceiver(fixes=moving_fixes, clock=clock)
         modem = FakeModem(samples=[])
         config = CollectorConfig(max_idle_time=3.0, max_wait_for_first_fix=1000, wait_log_interval=1000)
-        collector = Collector(modem, gnss, config, run_status, heartbeat)
+        collector = Collector(modem, gnss, config, run_status, heartbeat, run_log)
 
-        assert collector.collect() == []
+        assert read_datapoints(collector.collect()) == []
 
         status = run_status.status()
         assert status.datapoints_total == 0
         assert status.pipeline_broken is True
 
     def test_gps_disabled_captures_on_poll_interval_ignoring_movement_threshold(
-            self, clock, keep_alive_mock, run_status, heartbeat):
+            self, clock, keep_alive_mock, run_status, heartbeat, run_log):
         # Alternating between the same spot and a nearby one that's below the default movement
         # threshold: real movement-threshold gating would filter the "nearby" reads out entirely,
         # so capturing all of them proves the poll-interval path is used instead.
@@ -285,34 +309,34 @@ class TestCollect:
             max_wait_for_first_fix=1000,
             wait_log_interval=1000,
         )
-        collector = Collector(modem, gnss, config, run_status, heartbeat)
+        collector = Collector(modem, gnss, config, run_status, heartbeat, run_log)
 
-        result = collector.collect()
+        run_log_path = collector.collect()
 
         # Idle time (unaffected by GPS-disabled captures) bounds the run: 4 captures 2s apart
         # (t=0,2,4,6) before idle_duration (6s) clears max_idle_time (5s).
-        assert [dp.fix.position for dp in result] == [pos_a, pos_a_nearby, pos_a, pos_a_nearby]
-        assert all(dp.fix.placeholder for dp in result)
+        assert positions(run_log_path) == [pos_a, pos_a_nearby, pos_a, pos_a_nearby]
+        assert all(dp["fix"]["placeholder"] for dp in read_datapoints(run_log_path))
         assert modem.query_count == 4
 
-    def test_gps_disabled_logs_a_startup_warning(self, clock, keep_alive_mock, run_status, heartbeat, caplog):
+    def test_gps_disabled_logs_a_startup_warning(self, clock, keep_alive_mock, run_status, heartbeat, run_log, caplog):
         gnss = FakeGNSSReceiver(fixes=[], clock=clock)
         modem = FakeModem()
         config = CollectorConfig(gps_enabled=False, max_wait_for_first_fix=0, wait_log_interval=100)
-        collector = Collector(modem, gnss, config, run_status, heartbeat)
+        collector = Collector(modem, gnss, config, run_status, heartbeat, run_log)
 
         with caplog.at_level("WARNING"):
             collector.collect()
 
         assert any("GPS disabled" in record.message for record in caplog.records)
 
-    def test_cleans_up_and_propagates_error_when_modem_raises(self, clock, keep_alive_mock, run_status, heartbeat):
+    def test_cleans_up_and_propagates_error_when_modem_raises(self, clock, keep_alive_mock, run_status, heartbeat, run_log):
         pos_a = Position(latitude=0.0, longitude=0.0)
         fix_a = GNSSFix(position=pos_a, num_satellites=8)
         gnss = FakeGNSSReceiver(fixes=[fix_a], clock=clock)
         modem = FakeModem(raise_on_call=1)
         config = CollectorConfig(max_idle_time=1.0, max_wait_for_first_fix=1000, wait_log_interval=1000)
-        collector = Collector(modem, gnss, config, run_status, heartbeat)
+        collector = Collector(modem, gnss, config, run_status, heartbeat, run_log)
 
         with pytest.raises(RuntimeError, match="modem failure"):
             collector.collect()
@@ -324,3 +348,47 @@ class TestCollect:
         keep_alive_mock.stop.assert_called_once()
         heartbeat.start.assert_called_once()
         heartbeat.stop.assert_called_once()
+
+
+class TestDurability:
+    def test_each_capture_reaches_disk_before_the_next_one_is_taken(
+            self, clock, keep_alive_mock, run_status, heartbeat, run_log):
+        # A power cut mid-run gets no chance to flush anything, so every capture must
+        # already be on disk by the time the following capture happens.
+        pos_a = Position(latitude=0.0, longitude=0.0)
+        pos_b = Position(latitude=NORTH_1KM, longitude=0.0)
+        captured_after_first: list[dict] = []
+
+        class RecordingModem(FakeModem):
+            def query_cell_info(self) -> list[CellSample]:
+                if self.query_count == 1:
+                    captured_after_first.extend(read_datapoints(run_log.path))
+                return super().query_cell_info()
+
+        fixes = [GNSSFix(position=pos_a, num_satellites=8), GNSSFix(position=pos_b, num_satellites=8)]
+        gnss = FakeGNSSReceiver(fixes=fixes, clock=clock)
+        config = CollectorConfig(max_idle_time=3.0, max_wait_for_first_fix=1000, wait_log_interval=1000)
+
+        Collector(RecordingModem(), gnss, config, run_status, heartbeat, run_log).collect()
+
+        assert len(captured_after_first) == 1
+
+    def test_captures_taken_before_a_crash_survive_on_disk(
+            self, clock, keep_alive_mock, run_status, heartbeat, run_log):
+        pos_a = Position(latitude=0.0, longitude=0.0)
+        pos_b = Position(latitude=NORTH_1KM, longitude=0.0)
+        pos_c = Position(latitude=2 * NORTH_1KM, longitude=0.0)
+
+        fixes = [
+            GNSSFix(position=pos_a, num_satellites=8),
+            GNSSFix(position=pos_b, num_satellites=8),
+            GNSSFix(position=pos_c, num_satellites=8),
+        ]
+        gnss = FakeGNSSReceiver(fixes=fixes, clock=clock)
+        modem = FakeModem(raise_on_call=3, raise_exc=RuntimeError("power lost"))
+        config = CollectorConfig(max_idle_time=1000, max_wait_for_first_fix=1000, wait_log_interval=1000)
+
+        with pytest.raises(RuntimeError, match="power lost"):
+            Collector(modem, gnss, config, run_status, heartbeat, run_log).collect()
+
+        assert positions(run_log.path) == [pos_a, pos_b]
