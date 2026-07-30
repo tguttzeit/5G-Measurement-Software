@@ -4,6 +4,7 @@ import pynmea2
 import serial
 
 from measurement_software.core.config import GnssConfig
+from measurement_software.core.serial_retry import read_with_retry
 from measurement_software.gnss.gnss_receiver import GNSSReceiver, GNSSFix, Position
 
 
@@ -15,6 +16,8 @@ class NMEASerial(GNSSReceiver):
         self._port = config.port
         self._baud_rate = config.baud_rate
         self._timeout = config.timeout
+        self._retries = config.retries
+        self._retry_delay_s = config.retry_delay_s
         self._serial = None  # type: ignore[var-annotated]
 
     def open(self) -> None:
@@ -28,7 +31,7 @@ class NMEASerial(GNSSReceiver):
 
     def read_fix(self) -> GNSSFix | None:
         """Reads one line and returns its GGA fix, or None if it isn't a valid GGA fix."""
-        line = self._connection.readline().decode(errors="replace").strip()
+        line = self._read_line()
         if not line.startswith(("$GNGGA", "$GPGGA")):
             return None
         msg = pynmea2.parse(line)
@@ -41,6 +44,21 @@ class NMEASerial(GNSSReceiver):
 
         position = Position(latitude=msg.latitude, longitude=msg.longitude, altitude=msg.altitude)
         return GNSSFix(position=position, num_satellites=int(msg.num_sats))
+
+    def _read_line(self) -> str:
+        """Reads one line, retrying a transient short/empty read (a pure timeout with nothing at all).
+
+        A non-empty line that just isn't a GGA sentence is a normal, expected NMEA stream
+        condition, not a failure — that's handled by read_fix() itself, not retried here.
+        """
+        raw = read_with_retry(
+            self._connection.readline,
+            is_transient=lambda b: not b,
+            retries=self._retries,
+            delay_s=self._retry_delay_s,
+            logger=self._logger,
+        )
+        return raw.decode(errors="replace").strip()
 
     @property
     def _connection(self) -> serial.Serial:

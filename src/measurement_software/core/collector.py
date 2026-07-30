@@ -1,39 +1,32 @@
 import logging
 import time
-from dataclasses import dataclass
 from datetime import datetime, UTC
 from math import radians, sin, cos, asin, sqrt
+from pathlib import Path
 from typing import Iterator
 
 from measurement_software.core.config import CollectorConfig, DeviceConfig
+from measurement_software.core.datapoint import Datapoint
 from measurement_software.core.heartbeat_sender import HeartbeatSender
 from measurement_software.core.keep_modem_alive_sender import KeepModemAliveSender
+from measurement_software.core.run_log import RunLog
 from measurement_software.core.run_status import RunStatusTracker
 from measurement_software.gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
-from measurement_software.modems.modem import Modem, CellSample
-
-
-@dataclass
-class Datapoint:
-    """A single cell-info sample paired with the GNSS fix and timestamp it was captured at."""
-
-    timestamp: str
-    device_id: str
-    mission_type: str
-    fix: GNSSFix
-    cell_sample: CellSample
+from measurement_software.modems.modem import Modem
 
 
 class Collector:
     """Runs a GPS-triggered measurement session, sampling the modem whenever the device moves."""
 
     def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig,
-                 run_status: RunStatusTracker, heartbeat: HeartbeatSender, device: DeviceConfig):
+                 run_status: RunStatusTracker, heartbeat: HeartbeatSender, run_log: RunLog,
+                 device: DeviceConfig):
         self._logger = logging.getLogger(__name__)
         self._modem = modem
         self._gnss_receiver = gnss_receiver
         self._run_status = run_status
         self._heartbeat = heartbeat
+        self._run_log = run_log
         self._device_id = device.device_id
         self._mission_type = device.mission_type
 
@@ -51,10 +44,15 @@ class Collector:
         self._last_pos: Position | None = None
         self._last_movement_time: float | None = None
 
-    def collect(self) -> list[Datapoint]:
-        """Waits for a GPS fix, then collects datapoints until movement stops for too long."""
+    def collect(self) -> Path:
+        """Waits for a GPS fix, then records datapoints until movement stops for too long.
+
+        Returns the run log written, which holds everything captured up to the moment the
+        session ended - including a session ended by the power being cut.
+        """
         self._modem.open()
         self._gnss_receiver.open()
+        self._run_log.open()
         time.sleep(1)
 
         self._keep_modem_alive.start()
@@ -68,28 +66,29 @@ class Collector:
 
         try:
             first_fix = self._wait_for_first_fix()
-            if first_fix is None:
-                return []
-
-            datapoints: list[Datapoint] = []
-            self._last_pos = None
-            self._last_movement_time = None
-
-            for fix in self._iter_fixes(first_fix):
-                if self._should_capture(fix):
-                    datapoints.extend(self._capture_datapoints(fix))
-
-                if self._has_been_idle_too_long():
-                    break
-
+            if first_fix is not None:
+                self._record_until_idle(first_fix)
         finally:
             self._heartbeat.stop()
             self._keep_modem_alive.stop()
+            self._run_log.close()
             self._gnss_receiver.close()
             self._modem.close()
             self._logger.info("Finished data collection")
 
-        return datapoints
+        return self._run_log.path
+
+    def _record_until_idle(self, first_fix: GNSSFix) -> None:
+        """Records a datapoint for every qualifying movement until the device sits still for too long."""
+        self._last_pos = None
+        self._last_movement_time = None
+
+        for fix in self._iter_fixes(first_fix):
+            if self._should_capture(fix):
+                self._run_log.append(self._capture_datapoints(fix))
+
+            if self._has_been_idle_too_long():
+                break
 
     def _wait_for_first_fix(self) -> GNSSFix | None:
         """Blocks until the receiver reports a fix, or returns None if none arrives in time."""

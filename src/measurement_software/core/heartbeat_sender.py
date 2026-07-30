@@ -6,19 +6,24 @@ from http.client import HTTPException
 
 from measurement_software.core.config import HeartbeatConfig
 from measurement_software.core.run_status import RunStatus, RunStatusTracker
+from measurement_software.core.storage_status import StorageStatus, StorageStatusReporter
 
 
 class HeartbeatSender:
     """Posts the run's status to the backend on a background thread while a run is going on.
 
     Reports liveness and whether the run is worth letting finish, so a broken run can be
-    noticed while the vehicle is still out rather than after the data is uploaded.
+    noticed while the vehicle is still out rather than after the data is uploaded. Also carries
+    the upload backlog's size and free disk space, for the same reason: free visibility, no
+    on-device policy attached (see decision record 0009).
     """
 
-    def __init__(self, config: HeartbeatConfig, run_status: RunStatusTracker):
+    def __init__(self, config: HeartbeatConfig, run_status: RunStatusTracker,
+                 storage_status: StorageStatusReporter):
         self._logger = logging.getLogger(__name__)
         self._config = config
         self._run_status = run_status
+        self._storage_status = storage_status
         self._stop_event: threading.Event | None = None
         self._thread: threading.Thread | None = None
 
@@ -54,19 +59,21 @@ class HeartbeatSender:
     def _run(self, stop_event: threading.Event) -> None:
         """Reports the run's status immediately, then once per configured interval."""
         while True:
-            self._send(self._run_status.status())
+            self._send(self._run_status.status(), self._storage_status.status())
             if stop_event.wait(self._config.interval_s):
                 return
 
-    def _send(self, status: RunStatus) -> None:
+    def _send(self, run_status: RunStatus, storage_status: StorageStatus) -> None:
         """Posts one status report, treating a failed send as a skipped tick rather than an error.
 
         A backend that is unreachable — a dead spot, a server outage — must never take a
         measurement run down with it.
         """
+        payload = run_status.as_payload()
+        payload["storage"] = storage_status.as_payload()
         request = urllib.request.Request(
             self._config.url,
-            data=json.dumps(status.as_payload()).encode(),
+            data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )

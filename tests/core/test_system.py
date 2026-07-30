@@ -50,6 +50,43 @@ class TestGpioHelpers:
 
         assert fake_gpio.calls == [("cleanup",)]
 
+    def test_setup_fan_gpio_configures_pin_as_low_output(self, fake_gpio):
+        system.setup_fan_gpio(27)
+
+        assert fake_gpio.calls == [
+            ("setwarnings", False),
+            ("setmode", "BCM"),
+            ("setup", 27, "OUT"),
+            ("output", 27, 0),
+        ]
+
+    def test_set_fan_state_true_drives_pin_high(self, fake_gpio):
+        system.set_fan_state(27, True)
+
+        assert fake_gpio.calls == [("output", 27, 1)]
+
+    def test_set_fan_state_false_drives_pin_low(self, fake_gpio):
+        system.set_fan_state(27, False)
+
+        assert fake_gpio.calls == [("output", 27, 0)]
+
+
+class TestReadCpuTemperatureCelsius:
+    def test_reads_millidegrees_and_converts_to_celsius(self, monkeypatch, tmp_path):
+        temp_file = tmp_path / "temp"
+        temp_file.write_text("70000\n")
+        monkeypatch.setattr("measurement_software.core.system._CPU_TEMPERATURE_PATH", str(temp_file))
+
+        assert system.read_cpu_temperature_celsius() == 70.0
+
+    def test_raises_when_thermal_zone_file_is_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            "measurement_software.core.system._CPU_TEMPERATURE_PATH", str(tmp_path / "missing")
+        )
+
+        with pytest.raises(FileNotFoundError):
+            system.read_cpu_temperature_celsius()
+
 
 class FakeCheckOutput:
     """Fakes subprocess.check_output for `ip -4 addr show <iface>`, keyed by iface."""
@@ -140,6 +177,9 @@ class FakeModem(Modem):
         self.calls.append("close")
         if self.fail_at == "close":
             raise RuntimeError("close failed")
+
+    def unlock_sim(self) -> None:
+        self.calls.append("unlock_sim")
 
     def query_cell_info(self) -> list[CellSample]:
         return []

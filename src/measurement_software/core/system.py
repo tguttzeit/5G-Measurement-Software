@@ -30,6 +30,30 @@ def cleanup_gpio() -> None:
     GPIO.cleanup()
 
 
+def setup_fan_gpio(pin: int) -> None:
+    """Configures the fan control pin as a low (off) output (Raspberry Pi only)."""
+    import RPi.GPIO as GPIO
+    GPIO.setwarnings(False)
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, GPIO.LOW)
+
+
+def set_fan_state(pin: int, on: bool) -> None:
+    """Drives the fan control pin high (on) or low (off)."""
+    import RPi.GPIO as GPIO
+    GPIO.output(pin, GPIO.HIGH if on else GPIO.LOW)
+
+
+_CPU_TEMPERATURE_PATH = "/sys/class/thermal/thermal_zone0/temp"
+
+
+def read_cpu_temperature_celsius() -> float:
+    """Reads the current CPU temperature from sysfs, in degrees Celsius."""
+    with open(_CPU_TEMPERATURE_PATH) as f:
+        return int(f.read().strip()) / 1000
+
+
 def log_ip_addrs(interfaces: tuple[str, ...] = ("wlan0", "wwan0")) -> None:
     """Logs the current IPv4 address, or its absence, for each given network interface."""
     for iface in interfaces:
