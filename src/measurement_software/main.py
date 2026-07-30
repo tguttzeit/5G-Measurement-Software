@@ -12,6 +12,7 @@ from measurement_software.core.run_log import RunLog, discard_stale_temp_files, 
 from measurement_software.core.run_phase import RunPhase
 from measurement_software.core.run_status import RunStatusTracker
 from measurement_software.core.status_display_updater import StatusDisplayUpdater
+from measurement_software.core.storage_status import StorageStatusReporter
 from measurement_software.core.uploader import Uploader
 from measurement_software.displays import create_display
 from measurement_software.gnss import create_gnss_receiver
@@ -47,7 +48,8 @@ def main() -> AppConfig:
             else NullGNSSReceiver()
         )
         run_status = RunStatusTracker(config.run_status)
-        heartbeat = HeartbeatSender(config.heartbeat, run_status)
+        storage_status = StorageStatusReporter(upload_dir, config.storage)
+        heartbeat = HeartbeatSender(config.heartbeat, run_status, storage_status)
         collector = Collector(modem, gnss_receiver, config.collector, run_status, heartbeat, RunLog(upload_dir))
         uploader = Uploader(config.uploader)
 
@@ -62,6 +64,7 @@ def main() -> AppConfig:
             discard_stale_temp_files(upload_dir)
             recover_unfinalized(upload_dir)
             uploader.upload_pending_files()
+            storage_status.status()
             log_ip_addrs(config.system.network_interfaces)
 
             run_phase.set("collecting")

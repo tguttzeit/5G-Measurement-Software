@@ -55,6 +55,12 @@ min_rsrp = -100.0
 min_rsrq = -11.0
 min_sinr = 0.0
 
+# Local upload-backlog safety net. Not a cap or eviction policy - just a loud warning if free
+# space on the upload_dir's filesystem drops below this margin, in case a connectivity gap runs
+# much longer than expected.
+[storage]
+low_free_space_warning_bytes = 500_000_000
+
 # Case fan on/off control via GPIO, based on CPU temperature with hysteresis. Disabled by
 # default. gpio_pin uses BCM numbering, same as system.shutdown_gpio.
 [fan]
