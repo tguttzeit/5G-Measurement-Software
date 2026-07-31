@@ -149,7 +149,7 @@ class LatencyTestConfig:
     load_test: str = "rrul"
     load_interval_s: float = 900.0
     load_length_s: int = 60
-    poll_interval_s: float = 5.0
+    poll_interval_s: float = 30.0
     movement_window_s: float = 30.0
     timeout_s: float = 300.0
 

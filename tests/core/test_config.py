@@ -64,7 +64,7 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.latency_test.load_test == "rrul"
     assert config.latency_test.load_interval_s == 900.0
     assert config.latency_test.load_length_s == 60
-    assert config.latency_test.poll_interval_s == 5.0
+    assert config.latency_test.poll_interval_s == 30.0
     assert config.latency_test.movement_window_s == 30.0
     assert config.latency_test.timeout_s == 300.0
     assert config.logging.level == "INFO"

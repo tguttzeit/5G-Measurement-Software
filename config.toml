@@ -101,9 +101,8 @@ baseline_length_s = 10
 load_test = "rrul"
 load_interval_s = 900.0
 load_length_s = 60
-# How often the tester checks whether a test is due, and how recently the vehicle must have
-# moved for a due test to actually run.
-poll_interval_s = 5.0
+# How often the tester wakes to see whether either test has come due.
+poll_interval_s = 30.0
 movement_window_s = 30.0
 timeout_s = 300.0
 
