@@ -12,6 +12,10 @@ RTT_SERIES = ("Ping (ms) avg", "Ping (ms) ICMP")
 DOWNLOAD_SERIES = ("TCP download sum", "TCP download avg")
 UPLOAD_SERIES = ("TCP upload sum", "TCP upload avg")
 
+# The columns flent computes per series. The rest of a row - the series name, its units, the
+# source filename - identify the row rather than measure anything.
+STATISTIC_COLUMNS = ("mean", "median", "min", "max", "std_dev", "variance", "cumul_total", "pct99")
+
 
 @dataclass(frozen=True)
 class FlentSummary:
@@ -87,7 +91,7 @@ class FlentRunner:
 
 def parse_stats_csv(output: str) -> FlentSummary | None:
     """Distills flent's stats_csv output into a summary, or None if it holds no usable series."""
-    statistics = {row["series"]: row for row in csv.DictReader(output.splitlines()) if row.get("series")}
+    statistics = _statistics_by_series(output)
     if not statistics:
         return None
 
@@ -97,6 +101,19 @@ def parse_stats_csv(output: str) -> FlentSummary | None:
         download_mbits_s=_statistic(statistics, DOWNLOAD_SERIES, "mean"),
         upload_mbits_s=_statistic(statistics, UPLOAD_SERIES, "mean"),
     )
+
+
+def _statistics_by_series(output: str) -> dict[str, dict[str, str | None]]:
+    """Indexes flent's per-series rows by series name, keeping only each row's measured columns.
+
+    The series name identifies the row, so it belongs in the key; carrying it in the value too
+    would leave two copies to keep straight.
+    """
+    return {
+        row["series"]: {column: row.get(column) for column in STATISTIC_COLUMNS}
+        for row in csv.DictReader(output.splitlines())
+        if row.get("series")
+    }
 
 
 def _statistic(statistics: dict[str, dict], series_names: tuple[str, ...], column: str) -> float | None:
