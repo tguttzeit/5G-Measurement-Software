@@ -138,6 +138,10 @@ class LatencyTestConfig:
     The two cadences are separate because the tests cost very different amounts: a baseline
     ping is nearly free, while a load test deliberately saturates the link for its whole
     length and spends real data and battery.
+
+    `movement_window_s` turns the collection loop's discrete movement reports - one per cleared
+    position threshold - into an answer about whether the vehicle is moving right now: it counts
+    as moving as long as it cleared that threshold within this many seconds.
     """
 
     enabled: bool = False

@@ -103,6 +103,13 @@ load_interval_s = 900.0
 load_length_s = 60
 # How often the tester wakes to see whether either test has come due.
 poll_interval_s = 30.0
+# How recently the vehicle must have moved for a due test to actually run. The collection loop
+# reports movement in discrete events - one each time the vehicle clears [collector]
+# position_threshold - so whether it is moving right now is answered by how long ago the last of
+# those was. A due test whose vehicle has been still for longer than this waits for the next
+# tick instead. At the 15 m default threshold, 30 s treats anything slower than roughly walking
+# pace as stopped: raise it to keep testing through slow traffic, lower it to stop testing
+# sooner after the vehicle parks.
 movement_window_s = 30.0
 timeout_s = 300.0
 
