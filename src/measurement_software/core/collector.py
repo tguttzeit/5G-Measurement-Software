@@ -9,6 +9,7 @@ from measurement_software.core.config import CollectorConfig, DeviceConfig
 from measurement_software.core.datapoint import Datapoint
 from measurement_software.core.heartbeat_sender import HeartbeatSender
 from measurement_software.core.keep_modem_alive_sender import KeepModemAliveSender
+from measurement_software.core.movement_tracker import MovementTracker
 from measurement_software.core.run_log import RunLog
 from measurement_software.core.run_status import RunStatusTracker
 from measurement_software.gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
@@ -19,7 +20,7 @@ class Collector:
     """Runs a GPS-triggered measurement session, sampling the modem whenever the device moves."""
 
     def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig,
-                 run_status: RunStatusTracker, heartbeat: HeartbeatSender, run_log: RunLog,
+                 run_status: RunStatusTracker, heartbeat: HeartbeatSender, run_log: RunLog[Datapoint],
                  device: DeviceConfig):
         self._logger = logging.getLogger(__name__)
         self._modem = modem
@@ -41,8 +42,14 @@ class Collector:
             config.keep_alive_host, config.keep_alive_port, config.keep_alive_interval_s
         )
 
+        self._movement = MovementTracker()
         self._last_pos: Position | None = None
         self._last_movement_time: float | None = None
+
+    @property
+    def movement(self) -> MovementTracker:
+        """Where the vehicle last moved, for anything running alongside the collection loop."""
+        return self._movement
 
     def collect(self) -> Path:
         """Waits for a GPS fix, then records datapoints until movement stops for too long.
@@ -85,6 +92,7 @@ class Collector:
 
         for fix in self._iter_fixes(first_fix):
             if self._should_capture(fix):
+                self._movement.record_movement(fix)
                 self._run_log.append(self._capture_datapoints(fix))
 
             if self._has_been_idle_too_long():
@@ -132,6 +140,10 @@ class Collector:
         identical placeholder fixes is always 0 — so every paced fix captures unconditionally
         instead of going through movement-threshold gating. Unlike a genuine movement, this never
         resets the idle clock, so max_idle_time still bounds how long a GPS-disabled run lasts.
+
+        A GPS-disabled run therefore reads as continuously moving to anything watching the
+        movement record, which is what that testing mode wants: the rest of the pipeline should
+        run as it would on the road, without real GNSS hardware attached.
         """
         if not self._gps_enabled:
             return True

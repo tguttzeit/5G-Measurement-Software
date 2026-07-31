@@ -11,8 +11,6 @@ from measurement_software.core.atomic_file import (
     fsync_directory,
     write_json_atomically,
 )
-from measurement_software.core.datapoint import Datapoint
-
 RUN_FILE_PREFIX = "gps_5g_"
 RUN_LOG_SUFFIX = ".jsonl"
 UPLOAD_SUFFIX = ".json"
@@ -20,17 +18,22 @@ UPLOAD_SUFFIX = ".json"
 logger = logging.getLogger(__name__)
 
 
-class RunLog:
-    """An append-only JSON Lines record of one run's datapoints, made durable after every append.
+class RunLog[RecordT]:
+    """An append-only JSON Lines record of one run's measurements, made durable after every append.
 
     One JSON object per line is what makes this survivable: an append interrupted by a
     power cut can only ever leave the last, incomplete line unparseable, while every line
     written before it stays independently valid. A single JSON array has no such property -
     one missing closing bracket makes the whole run unreadable.
+
+    The record type and the filename prefix go together: measurements that are written on
+    their own cadence, and mean something different to whoever reads them, get their own log
+    and their own upload file rather than being interleaved into one.
     """
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, prefix: str = RUN_FILE_PREFIX):
         self._directory = Path(directory)
+        self._prefix = prefix
         self._path: Path | None = None
         self._file: TextIO | None = None
 
@@ -43,20 +46,20 @@ class RunLog:
         """Creates this run's log file, making the file itself durable before anything is written to it."""
         self._directory.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        self._path = self._directory / f"{RUN_FILE_PREFIX}{timestamp}{RUN_LOG_SUFFIX}"
+        self._path = self._directory / f"{self._prefix}{timestamp}{RUN_LOG_SUFFIX}"
         self._file = open(self._path, "a")
         fsync_directory(self._directory)
         logger.info("Recording this run to %s", self._path.name)
 
-    def append(self, datapoints: list[Datapoint]) -> None:
-        """Appends datapoints to the run log, returning only once they are on the storage device."""
+    def append(self, records: list[RecordT]) -> None:
+        """Appends records to the run log, returning only once they are on the storage device."""
         if self._file is None:
-            raise RuntimeError("Run log must be opened before datapoints can be appended.")
-        if not datapoints:
+            raise RuntimeError("Run log must be opened before records can be appended.")
+        if not records:
             return
 
-        for datapoint in datapoints:
-            self._file.write(f"{json.dumps(asdict(datapoint))}\n")
+        for record in records:
+            self._file.write(f"{json.dumps(asdict(record))}\n")
         flush_to_disk(self._file)
 
     def close(self) -> None:
@@ -72,17 +75,17 @@ def finalize(path: Path) -> Path | None:
     The run log is only removed once the converted file is in place, so an interruption
     at any point here leaves the run recoverable from the log it came from.
     """
-    datapoints = _read_intact_datapoints(path)
-    if not datapoints:
-        logger.info("Run log %s holds no usable datapoints - discarding it.", path.name)
+    records = _read_intact_records(path)
+    if not records:
+        logger.info("Run log %s holds no usable records - discarding it.", path.name)
         path.unlink()
         return None
 
     upload_path = path.with_suffix(UPLOAD_SUFFIX)
-    write_json_atomically(upload_path, datapoints)
+    write_json_atomically(upload_path, records)
     path.unlink()
 
-    logger.info("%d datapoints finalized into %s", len(datapoints), upload_path.name)
+    logger.info("%d records finalized into %s", len(records), upload_path.name)
     return upload_path
 
 
@@ -122,14 +125,14 @@ def discard_stale_temp_files(directory: Path) -> None:
         fsync_directory(directory)
 
 
-def _read_intact_datapoints(path: Path) -> list[dict]:
+def _read_intact_records(path: Path) -> list[dict]:
     """Parses every complete line of a run log, skipping any line an interrupted append left partial."""
-    datapoints = []
+    records = []
     for number, line in enumerate(path.read_text().splitlines(), start=1):
         if not line.strip():
             continue
         try:
-            datapoints.append(json.loads(line))
+            records.append(json.loads(line))
         except json.JSONDecodeError:
             logger.warning("Skipping incomplete line %d of %s - lost to an interrupted write.", number, path.name)
-    return datapoints
+    return records

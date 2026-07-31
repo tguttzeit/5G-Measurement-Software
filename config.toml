@@ -84,6 +84,35 @@ i2c_port = 1
 i2c_address = 0x3C
 refresh_interval_s = 2.0
 
+# Active latency measurements via flent, run against a test server while the vehicle is moving.
+# Disabled by default: flent needs a counterpart running on the server (netperf for the load
+# test, a reachable host for the baseline ping), and the load test deliberately saturates the
+# link, so this must only be switched on once that server side is confirmed.
+# Requires flent and numpy on the device.
+[latency_test]
+enabled = false
+host = "add.your.test.server.here"
+flent_binary = "flent"
+# Cheap ping-only run, for the latency of an otherwise idle link.
+baseline_test = "ping"
+baseline_interval_s = 60.0
+baseline_length_s = 10
+# Latency under load: saturates the link for its whole length, hence the far sparser cadence.
+load_test = "rrul"
+load_interval_s = 900.0
+load_length_s = 60
+# How often the tester wakes to see whether either test has come due.
+poll_interval_s = 30.0
+# How recently the vehicle must have moved for a due test to actually run. The collection loop
+# reports movement in discrete events - one each time the vehicle clears [collector]
+# position_threshold - so whether it is moving right now is answered by how long ago the last of
+# those was. A due test whose vehicle has been still for longer than this waits for the next
+# tick instead. At the 15 m default threshold, 30 s treats anything slower than roughly walking
+# pace as stopped: raise it to keep testing through slow traffic, lower it to stop testing
+# sooner after the vehicle parks.
+movement_window_s = 30.0
+timeout_s = 300.0
+
 [uploader]
 upload_dir = "/home/admin/Logger/upload_queue"
 upload_user = "tim"
