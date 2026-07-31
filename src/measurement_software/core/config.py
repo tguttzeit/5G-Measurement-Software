@@ -198,13 +198,10 @@ def _build_run_status_config(raw: dict) -> RunStatusConfig:
     per_rat_thresholds = {rat: QualityThresholds(**raw.get(rat, {})) for rat in ("lte", "nr")}
     return RunStatusConfig(**(raw | per_rat_thresholds))
 
-def _validate_gpio_pins(config: AppConfig) -> None:
-    """Raises ValueError if two GPIO consumers are configured to use the same pin.
+_ONBOARD_UART_PORTS = frozenset({"/dev/serial0", "/dev/ttyAMA0", "/dev/ttyS0"})
 
-    Per decision record 0010, this only checks GPIO consumers that exist today: the shutdown
-    signal, the fan (when enabled), and the display's fixed I2C pins (when enabled) - not a
-    general reservation system.
-    """
+def _validate_gpio_pins(config: AppConfig) -> None:
+    """Raises ValueError if two GPIO consumers are configured to use the same pin."""
     claims: dict[int, str] = {}
     _claim_gpio_pin(claims, config.system.shutdown_gpio, "system.shutdown_gpio")
     if config.fan.enabled:
