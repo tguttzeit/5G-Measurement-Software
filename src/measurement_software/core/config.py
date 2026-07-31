@@ -209,6 +209,9 @@ def _validate_gpio_pins(config: AppConfig) -> None:
     if config.display.enabled:
         _claim_gpio_pin(claims, 2, "display (I2C SDA1, fixed)")
         _claim_gpio_pin(claims, 3, "display (I2C SCL1, fixed)")
+    if config.gnss_receiver.port in _ONBOARD_UART_PORTS:
+        _claim_gpio_pin(claims, 14, "gnss_receiver (UART TXD, fixed)")
+        _claim_gpio_pin(claims, 15, "gnss_receiver (UART RXD, fixed)")
 
 def _claim_gpio_pin(claims: dict[int, str], pin: int, owner: str) -> None:
     if pin in claims:

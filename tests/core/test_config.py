@@ -291,3 +291,54 @@ enabled = true
     assert config.system.shutdown_gpio == 17
     assert config.fan.gpio_pin == 27
     assert config.display.enabled is True
+
+
+def required_sections_with_gnss_port(port: str) -> str:
+    return """
+[modem]
+type = "quectel"
+port = "/dev/ttyUSB2"
+baud_rate = 115200
+timeout = 1.0
+
+[gnss_receiver]
+type = "quectel"
+port = \"""" + port + """\"
+baud_rate = 9600
+timeout = 1.0
+
+[uploader]
+upload_dir = "/data/uploads"
+upload_user = "pi"
+upload_host = "example.org"
+"""
+
+
+def test_load_config_raises_on_shutdown_and_gnss_onboard_uart_pin_conflict(tmp_path):
+    content = required_sections_with_gnss_port("/dev/serial0") + """
+[system]
+shutdown_gpio = 14
+"""
+    with pytest.raises(ValueError, match="GPIO pin conflict"):
+        load_config(write_config(tmp_path, content))
+
+
+def test_load_config_raises_on_fan_and_gnss_onboard_uart_pin_conflict(tmp_path):
+    content = required_sections_with_gnss_port("/dev/ttyAMA0") + """
+[fan]
+enabled = true
+gpio_pin = 15
+"""
+    with pytest.raises(ValueError, match="GPIO pin conflict"):
+        load_config(write_config(tmp_path, content))
+
+
+def test_load_config_does_not_raise_on_gnss_uart_pin_conflict_for_usb_adapter_port(tmp_path):
+    content = required_sections_with_gnss_port("/dev/ttyUSB3") + """
+[system]
+shutdown_gpio = 14
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.system.shutdown_gpio == 14
+    assert config.gnss_receiver.port == "/dev/ttyUSB3"
