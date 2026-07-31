@@ -22,10 +22,9 @@ class LatencyTestType(StrEnum):
 class LatencyResult:
     """One completed latency test, covering the stretch of road the vehicle drove while it ran.
 
-    Deliberately not part of a Datapoint (see decision record 0004): a datapoint is an instant -
-    one fix, one cell reading, taken together - while a latency test spans tens of seconds and,
-    since it only runs while the vehicle is moving, real distance. Hence a start and an end fix
-    rather than a single position.
+    Deliberately not part of a Datapoint: a datapoint is an instant - one fix, one cell reading,
+    taken together - while a latency test spans tens of seconds and, since it only runs while the
+    vehicle is moving, real distance. Hence a start and an end fix rather than a single position.
     """
 
     test_type: LatencyTestType

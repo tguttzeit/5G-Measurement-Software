@@ -137,7 +137,7 @@ class LatencyTestConfig:
 
     The two cadences are separate because the tests cost very different amounts: a baseline
     ping is nearly free, while a load test deliberately saturates the link for its whole
-    length and spends real data and battery (see decision record 0004).
+    length and spends real data and battery.
     """
 
     enabled: bool = False

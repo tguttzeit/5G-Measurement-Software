@@ -17,10 +17,10 @@ UPLOAD_SERIES = ("TCP upload sum", "TCP upload avg")
 class FlentSummary:
     """The few numbers kept from a flent run, distilled from its per-series statistics.
 
-    flent's own output is one row per traffic flow per test, which is far more than a
-    measurement campaign correlating latency with position needs (see decision record 0004).
-    Round-trip times are taken as median and 99th percentile, since a mean hides exactly the
-    tail that a loaded link produces; throughput is taken as a mean, being a rate over the run.
+    flent's own output is one row per traffic flow per test, which is far more than a measurement
+    campaign correlating latency with position needs. Round-trip times are taken as median and
+    99th percentile, since a mean hides exactly the tail that a loaded link produces; throughput
+    is taken as a mean, being a rate over the run.
     """
 
     rtt_ms: float | None = None
@@ -72,8 +72,7 @@ class FlentRunner:
         """Builds the flent invocation, sending statistics to stdout and raw data to a scratch directory.
 
         flent always writes its full raw result file somewhere; pointing that at a temporary
-        directory keeps it off the device's storage, which the upload backlog already has to
-        share (see decision record 0009).
+        directory keeps it off the device's storage, which the upload backlog already has to share.
         """
         return [
             self._binary,

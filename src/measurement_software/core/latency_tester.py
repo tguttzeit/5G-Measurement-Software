@@ -121,7 +121,7 @@ class LatencyTester:
 
         A test run while the vehicle is parked covers no new route and still spends the data
         and battery a load test costs, so a stationary tick postpones the test rather than
-        consuming it (see decision record 0004).
+        consuming it.
         """
         start = self._movement.moved_within(self._config.movement_window_s)
         if start is None:
