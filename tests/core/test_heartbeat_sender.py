@@ -120,6 +120,53 @@ class TestHeartbeatSender:
         }
         assert backend.timeouts[0] == 10.0
 
+    def test_posts_device_id_in_payload(self, backend, tmp_path):
+        tracker = tracker_with(CellSample(rat="LTE", rsrp=-80.0, rsrq=-8.0, sinr=12.0))
+        sender = HeartbeatSender(
+            HeartbeatConfig(enabled=True, url=URL, interval_s=3600, device_id="pi-north-01"),
+            tracker, storage_status_for(tmp_path),
+        )
+
+        sender.start()
+        wait_for_requests(backend, 1)
+        sender.stop()
+
+        payload = backend.payloads()[0]
+        assert payload["device_id"] == "pi-north-01"
+
+    def test_posts_device_key_in_header(self, backend, tmp_path):
+        tracker = tracker_with(CellSample(rat="LTE", rsrp=-80.0, rsrq=-8.0, sinr=12.0))
+        sender = HeartbeatSender(
+            HeartbeatConfig(enabled=True, url=URL, interval_s=3600, device_key="test-api-key-123"),
+            tracker, storage_status_for(tmp_path),
+        )
+
+        sender.start()
+        wait_for_requests(backend, 1)
+        sender.stop()
+
+        request = backend.requests[0]
+        assert request.headers["X-device-key"] == "test-api-key-123"
+
+    def test_posts_both_device_id_and_device_key(self, backend, tmp_path):
+        tracker = tracker_with(CellSample(rat="LTE", rsrp=-80.0, rsrq=-8.0, sinr=12.0))
+        sender = HeartbeatSender(
+            HeartbeatConfig(
+                enabled=True, url=URL, interval_s=3600,
+                device_id="pi-north-01", device_key="test-api-key-123"
+            ),
+            tracker, storage_status_for(tmp_path),
+        )
+
+        sender.start()
+        wait_for_requests(backend, 1)
+        sender.stop()
+
+        request = backend.requests[0]
+        payload = backend.payloads()[0]
+        assert payload["device_id"] == "pi-north-01"
+        assert request.headers["X-device-key"] == "test-api-key-123"
+
     def test_keeps_reporting_on_the_configured_interval(self, backend, tmp_path):
         tracker = RunStatusTracker(RunStatusConfig())
         sender = HeartbeatSender(

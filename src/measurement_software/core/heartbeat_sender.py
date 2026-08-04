@@ -71,10 +71,17 @@ class HeartbeatSender:
         """
         payload = run_status.as_payload()
         payload["storage"] = storage_status.as_payload()
+        if self._config.device_id:
+            payload["device_id"] = self._config.device_id
+        
+        headers = {"Content-Type": "application/json"}
+        if self._config.device_key:
+            headers["X-Device-Key"] = self._config.device_key
+        
         request = urllib.request.Request(
             self._config.url,
             data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:

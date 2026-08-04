@@ -88,6 +88,8 @@ class HeartbeatConfig:
     url: str = ""
     interval_s: float = 60.0
     timeout_s: float = 10.0
+    device_id: str = ""
+    device_key: str = ""
 
 @dataclass
 class StorageConfig:
