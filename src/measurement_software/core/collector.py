@@ -1,6 +1,5 @@
 import logging
 import time
-from datetime import datetime, UTC
 from math import radians, sin, cos, asin, sqrt
 from pathlib import Path
 from typing import Iterator
@@ -12,6 +11,7 @@ from measurement_software.core.keep_modem_alive_sender import KeepModemAliveSend
 from measurement_software.core.movement_tracker import MovementTracker
 from measurement_software.core.run_log import RunLog
 from measurement_software.core.run_status import RunStatusTracker
+from measurement_software.core.timestamp import utc_timestamp
 from measurement_software.gnss.gnss_receiver import GNSSReceiver, Position, GNSSFix
 from measurement_software.modems.modem import Modem
 
@@ -180,7 +180,7 @@ class Collector:
 
     def _capture_datapoints(self, fix: GNSSFix) -> list[Datapoint]:
         """Queries the modem and pairs each cell sample with the given fix and current timestamp."""
-        timestamp = f"{datetime.now(UTC).isoformat()}Z"
+        timestamp = utc_timestamp()
         samples = self._modem.query_cell_info()
         self._run_status.record_capture(samples)
 
