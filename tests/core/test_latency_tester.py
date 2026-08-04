@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,16 @@ from measurement_software.core.latency_tester import LatencyTester
 from measurement_software.core.movement_tracker import MovementTracker
 from measurement_software.core.run_log import RunLog
 from measurement_software.gnss.gnss_receiver import GNSSFix, Position
+
+
+def assert_valid_utc_timestamp(timestamp: str) -> None:
+    """Asserts that the timestamp is a valid ISO 8601 UTC timestamp that can be parsed."""
+    # Should be parseable by fromisoformat
+    parsed = datetime.fromisoformat(timestamp)
+    # Should be timezone-aware and in UTC
+    assert parsed.tzinfo == timezone.utc
+    # Should end with Z (RFC 3339 format)
+    assert timestamp.endswith("Z")
 
 
 class FakeClock:
@@ -253,8 +264,8 @@ class TestResults:
         assert result["rtt_p99_ms"] == 61.0
         assert result["start_fix"]["position"]["latitude"] == 1.0
         assert result["end_fix"]["position"]["latitude"] == 2.0
-        assert result["start_timestamp"].endswith("Z")
-        assert result["end_timestamp"].endswith("Z")
+        assert_valid_utc_timestamp(result["start_timestamp"])
+        assert_valid_utc_timestamp(result["end_timestamp"])
         assert result["device_id"] == "test-device"
         assert result["mission_type"] == "ground"
 
