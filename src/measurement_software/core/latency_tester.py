@@ -2,7 +2,6 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, UTC
 from pathlib import Path
 
 from measurement_software.core.config import DeviceConfig, LatencyTestConfig
@@ -10,6 +9,7 @@ from measurement_software.core.flent_runner import FlentRunner, FlentSummary
 from measurement_software.core.latency_result import LatencyResult, LatencyTestType
 from measurement_software.core.movement_tracker import Movement, MovementTracker
 from measurement_software.core.run_log import RunLog
+from measurement_software.core.timestamp import utc_timestamp
 
 
 @dataclass(frozen=True)
@@ -156,8 +156,3 @@ class LatencyTester:
             download_mbits_s=summary.download_mbits_s,
             upload_mbits_s=summary.upload_mbits_s,
         )
-
-
-def utc_timestamp() -> str:
-    """The current time in the same shape the collector stamps its datapoints with."""
-    return f"{datetime.now(UTC).isoformat()}Z"
