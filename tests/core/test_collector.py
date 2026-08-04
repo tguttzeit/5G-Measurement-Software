@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -11,6 +12,16 @@ from measurement_software.core.run_log import RunLog
 from measurement_software.core.run_status import RunStatusTracker
 from measurement_software.gnss.gnss_receiver import GNSSReceiver, GNSSFix, Position
 from measurement_software.modems.modem import Modem, CellSample
+
+
+def assert_valid_utc_timestamp(timestamp: str) -> None:
+    """Asserts that the timestamp is a valid ISO 8601 UTC timestamp that can be parsed."""
+    # Should be parseable by fromisoformat
+    parsed = datetime.fromisoformat(timestamp)
+    # Should be timezone-aware and in UTC
+    assert parsed.tzinfo == timezone.utc
+    # Should end with Z (RFC 3339 format)
+    assert timestamp.endswith("Z")
 
 
 class FakeClock:
@@ -227,7 +238,7 @@ class TestCollect:
         assert len(recorded) == 2
         assert [dp["cell_sample"]["rat"] for dp in recorded] == [s.rat for s in samples]
         assert all(dp["fix"]["num_satellites"] == fix_a.num_satellites for dp in recorded)
-        assert all(dp["timestamp"].endswith("Z") for dp in recorded)
+        assert all(assert_valid_utc_timestamp(dp["timestamp"]) or True for dp in recorded)
         assert all(dp["device_id"] == "test-device" for dp in recorded)
         assert all(dp["mission_type"] == "ground" for dp in recorded)
 
