@@ -40,6 +40,10 @@ enabled = false
 url = "https://add.your.backend.here/heartbeat"
 interval_s = 60.0
 timeout_s = 10.0
+# Device identifier for the backend to distinguish devices. Defaults to the Pi's hostname.
+device_id = ""
+# Per-device API key for authenticating heartbeat requests with the backend.
+device_key = ""
 
 # What the heartbeat reports about the run. A measurement counts as "good" only if it clears
 # every cutoff below; falling short on any one of them makes it "bad". Cutoffs are set per RAT,
