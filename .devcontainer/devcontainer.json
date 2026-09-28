@@ -1,0 +1,47 @@
+{
+    "name": "5g-measurement-software",
+    "image": "ghcr.io/astral-sh/uv:python3.12-bookworm-slim",
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "username": "${localEnv:USER}",
+            "uid": "1000",
+            "gid": "1000",
+            "installZsh": true,
+            "installOhMyZsh": true,
+            "configureZshAsDefaultShell": true
+        }
+    },
+    "remoteUser": "${localEnv:USER}",
+    "mounts": [
+        "source=${localWorkspaceFolder},target=/app,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.zshrc,target=/home/${localEnv:USER}/.zshrc,type=bind,consistency=cached,readonly",
+        "source=${localEnv:HOME}/.ssh/id_ed25519,target=/home/${localEnv:USER}/.ssh/id_ed25519,type=bind,consistency=cached,readonly",
+        "source=${localEnv:HOME}/.ssh/id_ed25519.pub,target=/home/${localEnv:USER}/.ssh/id_ed25519.pub,type=bind,consistency=cached,readonly",
+        "source=${localEnv:HOME}/.ssh/known_hosts,target=/home/${localEnv:USER}/.ssh/known_hosts,type=bind,consistency=cached"
+    ],
+    "remoteEnv": {
+        "SSH_AUTH_SOCK": "${localEnv:SSH_AUTH_SOCK}"
+    },
+    "runArgs": [
+        "--name",
+        "5g-measurement-software"
+    ],
+    "postCreateCommand": "uv sync",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "aaron-bond.better-comments",
+                "emilast.logfilehighlighter",
+                "foxundermoon.shell-format",
+                "mhutchie.git-graph",
+                "redhat.vscode-yaml",
+                "tamasfe.even-better-toml",
+                "timonwong.shellcheck",
+                "usernamehw.errorlens",
+                "yzhang.markdown-all-in-one",
+                "ms-python.python",
+                "charliermarsh.ruff"
+            ]
+        }
+    }
+}
