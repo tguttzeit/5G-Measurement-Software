@@ -1,0 +1,203 @@
+[modem]
+type = "quectel"
+port = "/dev/ttyUSB2"
+baud_rate = 115200
+timeout = 1.0
+# "servingcell" (Standard, AT+QENG) or "sa_scan" (AT+QSCAN, NR5G-SA-only).
+# For "sa_scan", band/modus have to be set manually via AT console before running:
+#   AT+QNWPREFCFG="mode_pref",NR5GSA
+#   AT+QNWPREFCFG="nr5g_disable",0
+#   AT+QNWPREFCFG="nsa_disable",1
+#   AT+QNWPREFCFG="lte_disable",1
+mode = "serving_cell"
+
+[gnss_receiver]
+type = "nmea_serial"
+port = "/dev/serial0"
+baud_rate = 9600
+timeout = 1.0
+
+# device_id is omitted here - it defaults to this Pi's hostname, which is already distinct
+# per device in a fleet. Set it explicitly only to override that.
+[device]
+mission_type = "ground"
+
+[collector]
+position_threshold = 15
+max_idle_time = 200
+max_wait_for_first_fix = 300
+wait_log_interval = 5
+keep_alive_host = "8.8.8.8"
+keep_alive_port = 53
+keep_alive_interval_s = 4.0
+gps_enabled = true
+gps_disabled_poll_interval_s = 5.0
+
+# Pre-flight wait for confirmed vehicle movement, before Collector.collect() starts. Runs
+# GNSS-only, at a low duty cycle. In Auto Mode the modem/quectel-CM are already open for the
+# heartbeat by the time this wait starts.
+[movement_gate]
+poll_interval_s = 120.0
+movement_threshold = 15.0
+confirmations_required = 2
+# Optional known garage/home position - unset (the default) falls back to pure movement-distance
+# detection. Set both to additionally require departure from this position before starting a run.
+# home_latitude = 0.0
+# home_longitude = 0.0
+home_departure_threshold = 100.0
+
+# quectel-CM connection-manager daemon, started by this app itself (via sudo) once movement is
+# confirmed - not auto-started by systemd at boot.
+# binary is this device's local install path - set it in config.local.toml, not here (see
+# docs/device-bringup-faq.md). The placeholder below is intentionally never a real path.
+[quectel_cm]
+binary = "/add/your/quectel-CM/path/here"
+args = ["-s", "web.vodafone.de"]
+
+# Shared destination for everything this device sends to the backend server (heartbeat and
+# measurement uploads alike). url must be https, since the backend's answers are a path for
+# instructions to reach the device.
+# url and device_key are per-device identity/secrets - set them in config.local.toml, not here
+# (see docs/device-bringup-faq.md). The placeholders below are intentionally never real values.
+[backend]
+url = "https://add.your.backend.here"
+# Per-device API key for authenticating requests with the backend.
+device_key = ""
+
+# Periodic report to the backend on how the current run is going. Its response can carry
+# allow-listed config overrides and one-shot remote commands - hmac_secret verifies those
+# responses came from the real backend. Leave it unset to keep remote commands disabled (any
+# response claiming to carry them is discarded and logged).
+# device_id and hmac_secret are per-device identity/secrets - set them in config.local.toml, not
+# here (see docs/device-bringup-faq.md).
+[heartbeat]
+enabled = true
+path = "/api/heartbeat"
+interval_s = 60.0
+timeout_s = 10.0
+# Device identifier for the backend to distinguish devices. Defaults to the Pi's hostname.
+device_id = ""
+hmac_secret = ""
+
+# Where `python -m measurement_software.selftest` reports check results (pass/fail/skip per
+# hardware-facing subsystem), for the manual field checks described in ADR 0018. Reuses
+# heartbeat.device_id/heartbeat.device_key above for authentication - no separate credential.
+# Empty by default: an unconfigured device runs selftest checks locally (console output) only.
+# results_url is per-device identity (embeds the real backend host) - set it in
+# config.local.toml, not here (see docs/device-bringup-faq.md).
+[selftest]
+results_url = ""
+
+# Live GPS-fix-finding diagnostic (run-gps-fix-test-now / stop-gps-fix-test-now), for finding a
+# good antenna mounting position - only dispatched while in Waiting Mode. Posts num_satellites/has_fix/elapsed_s to
+# status_url roughly every report_interval_s while the run is going; auto-stops after timeout_s
+# if stop-gps-fix-test-now never arrives. Reuses heartbeat.device_id/backend.device_key for
+# authentication - no separate credential. status_url is per-device identity (embeds the real
+# backend host) - set it in config.local.toml, not here (see docs/device-bringup-faq.md).
+[gps_fix_test]
+status_url = ""
+report_interval_s = 2.0
+timeout_s = 300.0
+
+# What the heartbeat reports about the run. A measurement counts as "good" only if it clears
+# every cutoff below; falling short on any one of them makes it "bad". Cutoffs are set per RAT,
+# and only apply to readings that are physically possible in the first place - an impossible
+# value counts as "invalid" instead, which is decided from the radio standard, not from here.
+[run_status]
+# How many consecutive captures may come back empty while the device is moving before the
+# heartbeat reports the measurement pipeline as broken.
+empty_captures_until_pipeline_broken = 3
+
+[run_status.lte]
+min_rsrp = -100.0
+min_rsrq = -11.0
+min_sinr = 0.0
+
+[run_status.nr]
+min_rsrp = -100.0
+min_rsrq = -11.0
+min_sinr = 0.0
+
+# Local upload-backlog safety net. Not a cap or eviction policy - just a loud warning if free
+# space on the upload_dir's filesystem drops below this margin, in case a connectivity gap runs
+# much longer than expected.
+[storage]
+low_free_space_warning_bytes = 500_000_000
+
+# Case fan on/off control via GPIO, based on CPU temperature with hysteresis. Disabled by
+# default. gpio_pin uses BCM numbering, same as system.shutdown_gpio.
+[fan]
+enabled = false
+gpio_pin = 27
+temp_on_celsius = 70.0
+temp_off_celsius = 60.0
+poll_interval_s = 5.0
+
+# Small SSD1306 OLED status display over I2C, for field diagnostics with no terminal attached.
+# Disabled by default so the app runs unchanged without a screen attached.
+[display]
+enabled = true
+type = "ssd1306"
+i2c_port = 1
+i2c_address = 0x3C
+refresh_interval_s = 2.0
+
+# Active latency measurements via flent, run against a test server while the vehicle is moving.
+# Disabled by default: flent needs a counterpart running on the server (netperf for the load
+# test, a reachable host for the baseline ping), and the load test deliberately saturates the
+# link, so this must only be switched on once that server side is confirmed.
+# Requires flent and numpy on the device. host is per-device identity (the real test server
+# hostname) - set it in config.local.toml, not here (see docs/device-bringup-faq.md).
+[latency_test]
+enabled = true
+host = ""
+flent_binary = "flent"
+# Cheap ping-only run, for the latency of an otherwise idle link.
+baseline_test = "ping"
+baseline_interval_s = 60.0
+baseline_length_s = 10
+# Latency under load: saturates the link for its whole length, hence the far sparser cadence.
+load_test = "rrul"
+load_interval_s = 900.0
+load_length_s = 60
+# How often the tester wakes to see whether either test has come due.
+poll_interval_s = 30.0
+# How recently the vehicle must have moved for a due test to actually run. The collection loop
+# reports movement in discrete events - one each time the vehicle clears [collector]
+# position_threshold - so whether it is moving right now is answered by how long ago the last of
+# those was. A due test whose vehicle has been still for longer than this waits for the next
+# tick instead. At the 15 m default threshold, 30 s treats anything slower than roughly walking
+# pace as stopped: raise it to keep testing through slow traffic, lower it to stop testing
+# sooner after the vehicle parks.
+movement_window_s = 30.0
+timeout_s = 300.0
+
+# Uploads go over HTTPS POST to [backend] url's scheme and host, with this section's own path
+# swapped in for [backend]'s - there is no separate upload host/port to configure. `path` and
+# `latency_path` are separate endpoints: they carry incompatible schemas (see UploaderConfig).
+# Confirmed live against the real backend: unlike `path`, which takes one POST per *file* (a
+# whole batch array), `latency_path` only accepts one POST per *record* (a bare JSON object) -
+# it 422s a posted array outright. Uploader.upload_pending_files() already accounts for this
+# (see Uploader._upload_latency_file); this is just a heads-up in case that endpoint's contract
+# ever changes on the backend side.
+[uploader]
+upload_dir = "/home/admin/Logger/upload_queue"
+path = "/api/measurements"
+latency_path = "/api/latency-results"
+debug_upload = true
+timeout_s = 10.0
+
+[logging]
+level = "INFO"
+log_file = "5g-measurement.log"
+max_bytes = 5_000_000
+backup_count = 3
+
+[system]
+running_on_pi = true
+shutdown_gpio = 17
+network_interfaces = ["wlan0", "wwan0"]
+# "auto" (default) waits for confirmed movement before opening the modem/quectel-CM. "waiting"
+# opens the cellular link and starts heartbeating immediately at boot instead, then does nothing
+# further until an explicit remote command (start-measuring-now) says what to do.
+mode = "auto"

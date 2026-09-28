@@ -1,0 +1,14 @@
+[Unit]
+Description=5G Measurement Software
+# Deliberately does NOT require/start quectel-CM here - the app itself starts quectel-CM right at
+# boot (both Auto Mode and Waiting Mode).
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/admin/5g_measurement_software
+ExecStart=/home/admin/5g_measurement_software/.venv/bin/python -m measurement_software.main
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
