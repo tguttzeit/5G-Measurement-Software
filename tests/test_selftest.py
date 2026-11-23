@@ -11,17 +11,15 @@ class TestParseArgs:
         args = selftest.parse_args([])
 
         assert args.checks == []
-        assert args.confirm_side_effects is False
 
     def test_accepts_specific_check_names(self):
         args = selftest.parse_args(["modem", "gps"])
 
         assert args.checks == ["modem", "gps"]
 
-    def test_accepts_confirm_side_effects_flag(self):
-        args = selftest.parse_args(["uploader", "--confirm-side-effects"])
-
-        assert args.confirm_side_effects is True
+    def test_rejects_the_removed_confirm_side_effects_flag(self):
+        with pytest.raises(SystemExit):
+            selftest.parse_args(["uploader", "--confirm-side-effects"])
 
     def test_rejects_an_unknown_check_name(self):
         with pytest.raises(SystemExit):
@@ -40,9 +38,8 @@ class TestMain:
         monkeypatch.setattr(selftest, "setup_logging", lambda config: recorded_calls.setdefault("logging_setup", True))
         monkeypatch.setattr(selftest, "SelftestResultsReporter", lambda *a, **k: recorded_calls.setdefault("reporter", object()))
 
-        def fake_run_checks(config, names, *, confirm_side_effects, reporter):
+        def fake_run_checks(config, names, *, reporter):
             recorded_calls["names"] = names
-            recorded_calls["confirm_side_effects"] = confirm_side_effects
             return results
 
         monkeypatch.setattr(selftest, "run_checks", fake_run_checks)
@@ -58,7 +55,6 @@ class TestMain:
 
         assert exit_code == 0
         assert recorded["names"] == selftest.available_checks()
-        assert recorded["confirm_side_effects"] is False
         out = capsys.readouterr().out
         assert "[PASS] modem" in out
         assert "[SKIP] display" in out
@@ -74,16 +70,6 @@ class TestMain:
 
         assert exit_code == 1
         assert recorded["names"] == ["modem"]
-
-    def test_passes_confirm_side_effects_through(self, monkeypatch):
-        recorded: dict = {}
-        self._stub(monkeypatch, [
-            CheckResult(name="uploader", status=CheckStatus.PASSED, duration_ms=5.0),
-        ], recorded)
-
-        selftest.main(["uploader", "--confirm-side-effects"])
-
-        assert recorded["confirm_side_effects"] is True
 
     def test_never_calls_perform_shutdown(self, monkeypatch):
         # selftest must never trigger a real system shutdown, regardless of flags passed.

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 # The SSD1306 this is built for is 128x64px; at the default font (~6px/char, 10px row height)
 # that's ~21 characters per row and ~6 rows before content runs off the physical screen -
-# confirmed while scoping issue #39. Any future display with different geometry would need its
+# confirmed on the device. Any future display with different geometry would need its
 # own budget, but there is only the one concrete display driver today.
 MAX_LINE_CHARS = 21
 MAX_LINES = 6

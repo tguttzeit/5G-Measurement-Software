@@ -28,7 +28,7 @@ _STATUS_MARKERS = {
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parses selftest CLI arguments: which checks to run, and whether to allow side effects."""
+    """Parses selftest CLI arguments: which checks to run."""
     parser = argparse.ArgumentParser(
         prog="python -m measurement_software.selftest",
         description=(
@@ -40,14 +40,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "checks", nargs="*", default=[],
         help="Which checks to run (default: all). One or more of: " + ", ".join(available_checks()),
-    )
-    parser.add_argument(
-        "--confirm-side-effects", action="store_true",
-        help=(
-            "Also run checks that have a real external side effect (currently: one real "
-            "throwaway file uploaded to the configured backend via the uploader check). "
-            "Never triggers a real system shutdown - selftest has no shutdown check."
-        ),
     )
     args = parser.parse_args(argv)
 
@@ -79,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         config.selftest, device_id=config.heartbeat.device_id, device_key=config.backend.device_key,
     )
 
-    results = run_checks(config, names, confirm_side_effects=args.confirm_side_effects, reporter=reporter)
+    results = run_checks(config, names, reporter=reporter)
     for result in results:
         print(_format_result(result))
 

@@ -17,13 +17,17 @@ _PACKAGE_PREFIX = "measurement_software."
 
 class CrashAction(StrEnum):
     REBOOT = "reboot"
-    ESCALATE_TO_WAITING = "escalate_to_waiting"
+    RECOVERY = "recovery"
     ENTER_MAINTENANCE = "enter_maintenance"
 
 
 class _Escalation(StrEnum):
-    WAITING = "waiting"
+    RECOVERY = "recovery"
+    RECOVERY_CONSUMED = "recovery_consumed"
     MAINTENANCE = "maintenance"
+
+
+_LEGACY_ESCALATIONS = {"waiting": _Escalation.RECOVERY}
 
 
 @dataclass(frozen=True)
@@ -73,11 +77,16 @@ class CrashPolicy:
     An unknown error is often transient (a device dropping off USB, a brief hardware hiccup), so
     the first answer is a reboot. A reboot that only reproduces the error is a loop, though, so
     once the same error has occurred `same_error_limit` times in a row, or `reboot_limit`
-    reboots for unhandled errors of any kind have happened in a row, the device escalates to
-    Waiting Mode - which doesn't measure until told to - and reboots into it. An error even then
-    means the fault isn't in measuring alone: the next boot enters maintenance mode, which runs
-    nothing but the cellular link and a critical-error heartbeat, so the device stays reachable
-    for debugging over SSH instead of looping or switching itself off.
+    reboots for unhandled errors of any kind have happened in a row, the device escalates to the
+    recovery state and reboots into it: that one boot doesn't measure until told to, so the
+    fault can be looked at remotely. The recovery state is consumed (consume_recovery()) when
+    the device enters it, so the boot after is a normal one. An error after that - or during
+    the recovery boot itself - means the fault isn't in measuring alone: the next boot enters
+    maintenance mode, which runs nothing but the cellular link and a critical-error heartbeat,
+    so the device stays reachable for debugging over SSH instead of looping or switching itself
+    off. The counters stay when the recovery state is consumed, so a consumed recovery can't be
+    told apart from "never escalated" by them alone - the state therefore remembers it was used
+    (otherwise the same thresholds would just trigger another recovery, forever).
 
     The state lives in a small file that survives reboots. A run that ends normally clears it
     (reset()); maintenance mode is only left by deleting that file and rebooting.
@@ -99,8 +108,8 @@ class CrashPolicy:
             action = CrashAction.ENTER_MAINTENANCE
             new_state = _CrashState(fingerprint, same_error_count, state.consecutive_reboots + 1, _Escalation.MAINTENANCE)
         elif same_error_count >= self._same_error_limit or state.consecutive_reboots >= self._reboot_limit:
-            action = CrashAction.ESCALATE_TO_WAITING
-            new_state = _CrashState(fingerprint, same_error_count, state.consecutive_reboots + 1, _Escalation.WAITING)
+            action = CrashAction.RECOVERY
+            new_state = _CrashState(fingerprint, same_error_count, state.consecutive_reboots + 1, _Escalation.RECOVERY)
         else:
             action = CrashAction.REBOOT
             new_state = _CrashState(fingerprint, same_error_count, state.consecutive_reboots + 1)
@@ -112,8 +121,23 @@ class CrashPolicy:
         """Whether a previous boot decided this one has to run in maintenance mode."""
         return self._load_state().escalation == _Escalation.MAINTENANCE
 
-    def maintenance_details(self) -> dict:
-        """What maintenance mode reports to the backend about why it's active."""
+    def in_recovery(self) -> bool:
+        """Whether a previous boot decided this one is the one-shot recovery boot."""
+        return self._load_state().escalation == _Escalation.RECOVERY
+
+    def consume_recovery(self) -> None:
+        """Marks the recovery state as used, so the next boot is a normal one.
+
+        The counters stay; the escalation turns into "recovery consumed" rather than disappearing,
+        so a crash on the following boot goes to maintenance mode instead of recovering again.
+        """
+        state = self._load_state()
+        if state.escalation == _Escalation.RECOVERY:
+            state.escalation = _Escalation.RECOVERY_CONSUMED
+            self._save_state(state)
+
+    def details(self) -> dict:
+        """What recovery and maintenance mode report to the backend about why they're active."""
         state = self._load_state()
         return {
             "fingerprint": state.fingerprint,
@@ -155,7 +179,9 @@ class CrashPolicy:
         if not self._state_path.exists():
             return _CrashState()
         try:
-            return _CrashState(**json.loads(self._state_path.read_text()))
+            state = _CrashState(**json.loads(self._state_path.read_text()))
+            state.escalation = _LEGACY_ESCALATIONS.get(state.escalation, state.escalation)
+            return state
         except (OSError, ValueError, TypeError) as e:
             logger.warning("Ignoring unreadable %s: %s", self._state_path.name, e)
             return _CrashState()

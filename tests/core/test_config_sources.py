@@ -1,4 +1,5 @@
 import copy
+import json
 import logging
 import threading
 import time
@@ -25,8 +26,15 @@ from measurement_software.core.config import (
     StorageConfig,
     SystemConfig,
     UploaderConfig,
+    LAST_GOOD_LINK_SETTINGS_FILENAME,
+    LinkWatchdogConfig,
+    load_link_settings,
 )
 from measurement_software.core.config_sources import (
+    MANUAL_NEXT_BOOT_FILENAME,
+    consume_manual_next_boot_marker,
+    manual_next_boot_marker_present,
+    write_manual_next_boot_marker,
     CLEARED,
     FIELD_SPECS,
     ConfigOverrides,
@@ -34,13 +42,15 @@ from measurement_software.core.config_sources import (
     apply_overrides,
     load_overrides,
     migrate_legacy_mode_override,
+    migrate_legacy_system_mode,
     load_local_config,
     promote_overrides,
-    read_and_clear_pending_reboot_ack,
+    read_and_clear_pending_command_ack,
     read_overrides_file,
     sanitize_overrides,
     write_overrides_file,
-    write_pending_reboot_ack,
+    write_pending_command_ack,
+    save_last_good_link_settings,
 )
 
 
@@ -54,42 +64,80 @@ def make_app_config() -> AppConfig:
         quectel_cm=QuectelCmConfig(),
         run_status=RunStatusConfig(),
         backend=BackendConfig(),
-        heartbeat=HeartbeatConfig(),
+        heartbeat=HeartbeatConfig(enabled=False),
         selftest=SelftestConfig(),
         gps_fix_test=GpsFixTestConfig(),
         storage=StorageConfig(),
-        display=DisplayConfig(),
-        latency_test=LatencyTestConfig(),
+        display=DisplayConfig(enabled=False),
+        latency_test=LatencyTestConfig(enabled=False),
         uploader=UploaderConfig(upload_dir="/data/uploads"),
         logging=LoggingConfig(),
         system=SystemConfig(),
     )
 
 
+class TestLastGoodLinkSettings:
+    """Kept on every boot whose config loaded, for the emergency link to fall back on."""
+
+    def config_with_link(self) -> AppConfig:
+        config = make_app_config()
+        config.quectel_cm = QuectelCmConfig(binary="/opt/quectel-CM", args=("-s", "apn.example"))
+        config.link_watchdog = LinkWatchdogConfig(interface="wwan1", restart_after_s=60.0)
+        config.backend = BackendConfig(url="https://backend.example", device_key="secret-key")
+        return config
+
+    def test_the_emergency_link_reads_them_back_when_the_config_is_unreadable(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        save_last_good_link_settings(self.config_with_link(), config_path)
+        config_path.write_text("this is [not toml")
+
+        settings = load_link_settings(config_path)
+
+        assert settings.running_on_pi is True
+        assert settings.quectel_cm == QuectelCmConfig(binary="/opt/quectel-CM", args=("-s", "apn.example"))
+        assert settings.link_watchdog == LinkWatchdogConfig(interface="wwan1", restart_after_s=60.0)
+
+    def test_hold_the_link_settings_only(self, tmp_path):
+        save_last_good_link_settings(self.config_with_link(), tmp_path / "config.toml")
+
+        saved = json.loads((tmp_path / LAST_GOOD_LINK_SETTINGS_FILENAME).read_text())
+
+        assert set(saved) == {"system", "quectel_cm", "link_watchdog"}
+        assert saved["system"] == {"running_on_pi": True}
+        assert "secret-key" not in json.dumps(saved)
+
+    def test_a_failing_write_is_only_logged(self, tmp_path, caplog):
+        caplog.set_level(logging.WARNING)
+
+        save_last_good_link_settings(self.config_with_link(), tmp_path / "missing_dir" / "config.toml")
+
+        assert LAST_GOOD_LINK_SETTINGS_FILENAME in caplog.text
+
+
 class TestPendingRebootAck:
     def test_read_returns_none_when_no_file_exists(self, tmp_path):
-        assert read_and_clear_pending_reboot_ack(tmp_path / "pending_reboot_ack.toml") is None
+        assert read_and_clear_pending_command_ack(tmp_path / "pending_reboot_ack.toml") is None
 
     def test_write_then_read_round_trips_an_integer_id(self, tmp_path):
         path = tmp_path / "pending_reboot_ack.toml"
-        write_pending_reboot_ack(path, 52)
+        write_pending_command_ack(path, 52)
 
-        assert read_and_clear_pending_reboot_ack(path) == 52
+        assert read_and_clear_pending_command_ack(path) == 52
 
     def test_write_then_read_round_trips_a_string_id(self, tmp_path):
         path = tmp_path / "pending_reboot_ack.toml"
-        write_pending_reboot_ack(path, "cmd-52")
+        write_pending_command_ack(path, "cmd-52")
 
-        assert read_and_clear_pending_reboot_ack(path) == "cmd-52"
+        assert read_and_clear_pending_command_ack(path) == "cmd-52"
 
     def test_read_removes_the_file_so_it_is_never_applied_twice(self, tmp_path):
         path = tmp_path / "pending_reboot_ack.toml"
-        write_pending_reboot_ack(path, 52)
+        write_pending_command_ack(path, 52)
 
-        read_and_clear_pending_reboot_ack(path)
+        read_and_clear_pending_command_ack(path)
 
         assert not path.exists()
-        assert read_and_clear_pending_reboot_ack(path) is None
+        assert read_and_clear_pending_command_ack(path) is None
 
 
 class TestLoadLocalConfig:
@@ -134,8 +182,16 @@ class TestApplyLocalConfig:
 
         assert config.quectel_cm.binary == "/usr/local/bin/quectel-CM"
 
+    def test_applies_the_ntp_server(self):
+        config = make_app_config()
+
+        apply_local_config(config, {"clock": {"ntp_server": "192.0.2.10", "ntp_timeout_s": 60}})
+
+        assert config.clock.ntp_server == "192.0.2.10"
+        assert config.clock.ntp_timeout_s == 3.0
+
     def test_applies_device_device_id(self):
-        """Must match [heartbeat] device_id - see docs/device-bringup-faq.md. Left unset,
+        """Must match [heartbeat] device_id - see the device setup documentation. Left unset,
         device.device_id silently defaults to the Pi's hostname, which the backend then rejects
         on upload as a device-identity mismatch against whatever authenticated the request."""
         config = make_app_config()
@@ -163,9 +219,9 @@ class TestApplyLocalConfig:
         config = make_app_config()
 
         with caplog.at_level(logging.WARNING):
-            apply_local_config(config, {"not_a_section": {"upload_host": "evil.example.org"}})
+            apply_local_config(config, {"not_a_section": {"upload_dir": "/evil"}})
 
-        assert config.uploader.upload_host == ""
+        assert config.uploader.upload_dir == "/data/uploads"
         assert "not allow-listed" in caplog.text
 
     def test_ignores_a_field_not_on_the_allow_list_within_an_allowed_section(self, caplog):
@@ -639,7 +695,6 @@ class TestSanitizeTypedOverrides:
 
     def test_rejects_a_bool_for_a_numeric_field(self):
         assert sanitize_overrides({"idle_threshold_s": True}) == {}
-        assert sanitize_overrides({"system_shutdown_gpio": True}) == {}
 
     def test_int_field_accepts_an_integral_float_as_int(self):
         result = sanitize_overrides({"gnss_receiver_retries": 3.0})
@@ -664,10 +719,20 @@ class TestSanitizeTypedOverrides:
             assert sanitize_overrides({"collector_capture_gate": value}) == {}
 
     def test_enum_values_per_field(self):
-        assert sanitize_overrides({"system_mode": "waiting"}) == {"system_mode": "waiting"}
+        assert sanitize_overrides({"system_mode": "manual"}) == {"system_mode": "manual"}
         assert sanitize_overrides({"device_mission_type": "drone"}) == {"device_mission_type": "drone"}
         assert sanitize_overrides({"modem_mode": "sa_scan"}) == {"modem_mode": "sa_scan"}
         assert sanitize_overrides({"system_mode": "bogus"}) == {}
+
+    def test_the_legacy_system_mode_waiting_is_translated_to_manual(self):
+        assert sanitize_overrides({"system_mode": "waiting"}) == {"system_mode": "manual"}
+
+    def test_only_the_exact_legacy_value_is_translated(self):
+        for value in ("Waiting", " waiting", "waiting ", "idle"):
+            assert sanitize_overrides({"system_mode": value}) == {}
+
+    def test_the_legacy_value_is_not_translated_for_other_fields(self):
+        assert sanitize_overrides({"modem_mode": "waiting"}) == {}
 
     def test_nullable_float_accepts_none_and_in_range_floats(self):
         assert sanitize_overrides({"movement_gate_home_latitude": None}) == {"movement_gate_home_latitude": None}
@@ -680,10 +745,12 @@ class TestSanitizeTypedOverrides:
     def test_none_is_rejected_for_a_non_nullable_field(self):
         assert sanitize_overrides({"idle_threshold_s": None}) == {}
 
-    def test_gpio_pin_bounds(self):
-        assert sanitize_overrides({"system_shutdown_gpio": 27}) == {"system_shutdown_gpio": 27}
-        assert sanitize_overrides({"system_shutdown_gpio": 28}) == {}
-        assert sanitize_overrides({"system_shutdown_gpio": 1}) == {}
+    def test_removed_shutdown_gpio_field_is_disallowed(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            result = sanitize_overrides({"system_shutdown_gpio": 22, "idle_threshold_s": 600})
+
+        assert result == {"idle_threshold_s": 600}
+        assert caplog.text.count("system_shutdown_gpio") == 1
 
     def test_removed_quality_threshold_fields_are_disallowed(self):
         for field in ("rsrp_threshold", "rsrq_threshold", "sinr_threshold"):
@@ -769,10 +836,10 @@ class TestApplyTypedOverrides:
             collector_gps_enabled=False, collector_gps_disabled_poll_interval_s=8.0,
             movement_gate_home_latitude=48.1, movement_gate_home_longitude=11.5,
             movement_gate_home_departure_threshold=200.0, latency_test_enabled=True,
-            system_mode="waiting", device_mission_type="drone", display_enabled=True,
+            system_mode="manual", device_mission_type="drone", display_enabled=True,
             display_refresh_interval_s=5.0, modem_mode="sa_scan", modem_sim_unlock_poll_attempts=20,
             modem_sim_unlock_poll_interval=2.0, gnss_receiver_retries=5, gnss_receiver_retry_delay_s=1.5,
-            system_running_on_pi=False, system_shutdown_gpio=22,
+            system_running_on_pi=False,
         ))
 
         assert config.collector.capture_gate == "time"
@@ -784,7 +851,7 @@ class TestApplyTypedOverrides:
         assert (config.movement_gate.home_latitude, config.movement_gate.home_longitude) == (48.1, 11.5)
         assert config.movement_gate.home_departure_threshold == 200.0
         assert config.latency_test.enabled is True
-        assert config.system.mode == "waiting"
+        assert config.system.mode == "manual"
         assert config.device.mission_type == "drone"
         assert config.display.enabled is True
         assert config.display.refresh_interval_s == 5.0
@@ -794,7 +861,6 @@ class TestApplyTypedOverrides:
         assert config.gnss_receiver.retries == 5
         assert config.gnss_receiver.retry_delay_s == 1.5
         assert config.system.running_on_pi is False
-        assert config.system.shutdown_gpio == 22
 
     def test_cleared_resets_a_nullable_field_to_none(self):
         config = make_app_config()
@@ -892,26 +958,26 @@ class TestMigrateLegacyMode:
 
     def test_migrates_a_valid_mode_and_removes_the_legacy_file(self, tmp_path):
         overrides_path, legacy_path = self._paths(tmp_path)
-        legacy_path.write_text('mode = "waiting"\n')
+        legacy_path.write_text('mode = "manual"\n')
 
         migrate_legacy_mode_override(overrides_path, legacy_path)
 
-        assert read_overrides_file(overrides_path) == {"system_mode": "waiting"}
+        assert read_overrides_file(overrides_path) == {"system_mode": "manual"}
         assert not legacy_path.exists()
 
     def test_keeps_the_other_overrides_already_on_disk(self, tmp_path):
         overrides_path, legacy_path = self._paths(tmp_path)
         write_overrides_file(overrides_path, {"idle_threshold_s": 300})
-        legacy_path.write_text('mode = "waiting"\n')
+        legacy_path.write_text('mode = "manual"\n')
 
         migrate_legacy_mode_override(overrides_path, legacy_path)
 
-        assert read_overrides_file(overrides_path) == {"idle_threshold_s": 300, "system_mode": "waiting"}
+        assert read_overrides_file(overrides_path) == {"idle_threshold_s": 300, "system_mode": "manual"}
 
     def test_an_existing_system_mode_wins(self, tmp_path):
         overrides_path, legacy_path = self._paths(tmp_path)
         write_overrides_file(overrides_path, {"system_mode": "auto"})
-        legacy_path.write_text('mode = "waiting"\n')
+        legacy_path.write_text('mode = "manual"\n')
 
         migrate_legacy_mode_override(overrides_path, legacy_path)
 
@@ -938,20 +1004,29 @@ class TestMigrateLegacyMode:
 
     def test_rerun_after_a_crash_between_write_and_delete_is_idempotent(self, tmp_path):
         overrides_path, legacy_path = self._paths(tmp_path)
-        write_overrides_file(overrides_path, {"system_mode": "waiting"})
+        write_overrides_file(overrides_path, {"system_mode": "manual"})
+        legacy_path.write_text('mode = "manual"\n')
+
+        migrate_legacy_mode_override(overrides_path, legacy_path)
+        migrate_legacy_mode_override(overrides_path, legacy_path)
+
+        assert read_overrides_file(overrides_path) == {"system_mode": "manual"}
+        assert not legacy_path.exists()
+
+    def test_a_legacy_waiting_mode_is_migrated_as_manual(self, tmp_path):
+        overrides_path, legacy_path = self._paths(tmp_path)
         legacy_path.write_text('mode = "waiting"\n')
 
         migrate_legacy_mode_override(overrides_path, legacy_path)
-        migrate_legacy_mode_override(overrides_path, legacy_path)
 
-        assert read_overrides_file(overrides_path) == {"system_mode": "waiting"}
+        assert read_overrides_file(overrides_path) == {"system_mode": "manual"}
         assert not legacy_path.exists()
 
     def test_the_legacy_file_is_kept_when_the_write_fails(self, tmp_path, monkeypatch):
         import measurement_software.core.config_sources as config_sources_module
 
         overrides_path, legacy_path = self._paths(tmp_path)
-        legacy_path.write_text('mode = "waiting"\n')
+        legacy_path.write_text('mode = "manual"\n')
 
         def failing_write(path, fields_to_write):
             raise OSError("disk full")
@@ -961,3 +1036,91 @@ class TestMigrateLegacyMode:
         migrate_legacy_mode_override(overrides_path, legacy_path)
 
         assert legacy_path.exists()
+
+
+class TestMigrateLegacySystemMode:
+    def test_is_a_no_op_without_an_overrides_file(self, tmp_path):
+        overrides_path = tmp_path / "config_overrides.toml"
+
+        migrate_legacy_system_mode(overrides_path)
+
+        assert not overrides_path.exists()
+
+    def test_rewrites_waiting_to_manual_and_keeps_the_other_overrides(self, tmp_path):
+        overrides_path = tmp_path / "config_overrides.toml"
+        overrides_path.write_text('idle_threshold_s = 300\nsystem_mode = "waiting"\ncleared = ["movement_gate_home_latitude"]\n')
+
+        migrate_legacy_system_mode(overrides_path)
+
+        assert read_overrides_file(overrides_path) == {
+            "idle_threshold_s": 300, "system_mode": "manual", "movement_gate_home_latitude": None,
+        }
+
+    def test_leaves_the_file_untouched_without_the_legacy_value(self, tmp_path):
+        overrides_path = tmp_path / "config_overrides.toml"
+        content = '# hand-edited\nsystem_mode = "auto"\n'
+        overrides_path.write_text(content)
+
+        migrate_legacy_system_mode(overrides_path)
+
+        assert overrides_path.read_text() == content
+
+    def test_leaves_an_unknown_value_for_validation_to_reject(self, tmp_path):
+        overrides_path = tmp_path / "config_overrides.toml"
+        overrides_path.write_text('system_mode = "bogus"\n')
+
+        migrate_legacy_system_mode(overrides_path)
+
+        assert read_overrides_file(overrides_path) == {"system_mode": "bogus"}
+        assert load_overrides(overrides_path).system_mode is None
+
+    def test_a_migrated_file_promotes_the_new_value(self, tmp_path):
+        config_path = _write_minimal_config_toml(tmp_path)
+        overrides_path = tmp_path / "config_overrides.toml"
+        overrides_path.write_text('system_mode = "waiting"\n')
+
+        migrate_legacy_system_mode(overrides_path)
+        promote_overrides(config_path)
+
+        assert 'mode = "manual"' in config_path.read_text()
+
+
+class TestManualNextBootMarker:
+    def test_a_written_marker_is_present(self, tmp_path):
+        path = tmp_path / MANUAL_NEXT_BOOT_FILENAME
+
+        write_manual_next_boot_marker(path)
+
+        assert manual_next_boot_marker_present(path)
+
+    def test_no_file_means_no_marker(self, tmp_path):
+        assert not manual_next_boot_marker_present(tmp_path / MANUAL_NEXT_BOOT_FILENAME)
+
+    def test_checking_does_not_consume_it(self, tmp_path):
+        path = tmp_path / MANUAL_NEXT_BOOT_FILENAME
+        write_manual_next_boot_marker(path)
+
+        manual_next_boot_marker_present(path)
+
+        assert manual_next_boot_marker_present(path)
+
+    def test_consuming_removes_it(self, tmp_path):
+        path = tmp_path / MANUAL_NEXT_BOOT_FILENAME
+        write_manual_next_boot_marker(path)
+
+        consume_manual_next_boot_marker(path)
+
+        assert not path.exists()
+
+    @pytest.mark.parametrize("content", ["not json", "{}", '{"manual_next_boot": false}',
+                                         '{"manual_next_boot": true, "extra": 1}', "[]", "true"])
+    def test_an_invalid_file_is_ignored_and_removed_with_a_log_entry(self, tmp_path, caplog, content):
+        path = tmp_path / MANUAL_NEXT_BOOT_FILENAME
+        path.write_text(content)
+
+        with caplog.at_level(logging.ERROR):
+            present = manual_next_boot_marker_present(path)
+
+        assert not present
+        assert not path.exists()
+        assert MANUAL_NEXT_BOOT_FILENAME in caplog.text

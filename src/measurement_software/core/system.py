@@ -4,12 +4,17 @@ import socket
 import subprocess
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from measurement_software.core.config import AppConfig, ModemConfig, QuectelCmConfig
-from measurement_software.core.config_sources import PENDING_REBOOT_ACK_FILENAME, write_pending_reboot_ack
+from measurement_software.core.config_sources import (
+    PENDING_REBOOT_ACK_FILENAME,
+    PENDING_SHUTDOWN_ACK_FILENAME,
+    write_pending_command_ack,
+)
 from measurement_software.core.run_log import discard_stale_temp_files, recover_unfinalized
 from measurement_software.core.run_phase import RunPhase, RunPhaseState
 from measurement_software.core.uploader import Uploader
@@ -19,27 +24,6 @@ from measurement_software.remote.heartbeat import HeartbeatSender
 from measurement_software.status.backend_status import RunStatusTracker, StorageStatusReporter
 
 logger = logging.getLogger(__name__)
-
-
-def setup_gpio(pin: int) -> None:
-    """Configures the shutdown pin as a low output (Raspberry Pi only)."""
-    import RPi.GPIO as GPIO
-    GPIO.setwarnings(False)
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(pin, GPIO.OUT)
-    GPIO.output(pin, GPIO.LOW)
-
-
-def signal_completion(pin: int) -> None:
-    """Drives the shutdown pin high to signal that the measurement run finished."""
-    import RPi.GPIO as GPIO
-    GPIO.output(pin, GPIO.HIGH)
-
-
-def cleanup_gpio() -> None:
-    """Releases the GPIO pins."""
-    import RPi.GPIO as GPIO
-    GPIO.cleanup()
 
 
 def log_ip_addrs(interfaces: tuple[str, ...] = ("wlan0", "wwan0")) -> None:
@@ -68,14 +52,34 @@ def start_quectel_cm(config: QuectelCmConfig) -> subprocess.Popen:
     return subprocess.Popen(["sudo", config.binary, *config.args])
 
 
-def set_system_clock(dt: datetime) -> None:
-    """Sets the system clock to the given UTC datetime, via sudo (needs root).
+QUECTEL_CM_STOP_TIMEOUT_S = 10.0
+
+
+def stop_quectel_cm(process: subprocess.Popen) -> None:
+    """Stops quectel-CM and waits for it to take the link down; kills it if that takes longer
+    than QUECTEL_CM_STOP_TIMEOUT_S. sudo passes the SIGTERM on to quectel-CM."""
+    if process.poll() is not None:
+        logger.warning("quectel-CM had already exited (exit code %s).", process.returncode)
+        return
+    logger.info("Stopping quectel-CM")
+    process.terminate()
+    try:
+        process.wait(timeout=QUECTEL_CM_STOP_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        logger.warning("quectel-CM didn't stop within %.0f s - killing it.", QUECTEL_CM_STOP_TIMEOUT_S)
+        process.kill()
+        process.wait()
+
+
+def set_system_clock(dt: datetime, source: str = "GNSS") -> None:
+    """Sets the system clock to the given UTC datetime, via sudo (needs root). `source` is only
+    for the log line.
 
     Not checked for success - same as perform_shutdown()'s own sudo calls - since this project has
     no fallback if it fails.
     """
     formatted = dt.strftime("%Y-%m-%d %H:%M:%S")
-    logger.info("Setting system clock to %s UTC (from GNSS)", formatted)
+    logger.info("Setting system clock to %s UTC (from %s)", formatted, source)
     subprocess.run(["sudo", "date", "-u", "-s", formatted])
 
 
@@ -123,7 +127,7 @@ def _send_terminal_heartbeat(
 ) -> None:
     """Best-effort last heartbeat before the board loses power or restarts.
 
-    Reports `phase` (SHUTTING_DOWN/REBOOTING) so the backend sees why the device is about to go
+    Reports `phase` (SHUTTING_DOWN/REBOOTING/STOPPING) so the backend sees why the device is about to go
     quiet, and - if a remote command triggered this - acks that command's id as "received": by
     the time any later heartbeat could report its actual success, shutdown-now's board is off
     and reboot-now's old process no longer exists to send one. Never raises: a network hiccup
@@ -148,23 +152,44 @@ def _send_terminal_heartbeat(
         logger.warning("Could not send terminal heartbeat: %s", e)
 
 
-def shutdown(config: AppConfig, reason: str, command_id: Any | None = None) -> None:
+_STOPPING_HEARTBEAT_TIMEOUT_S = 3.0
+
+
+def send_stopping_heartbeat(config: AppConfig) -> None:
+    """Best-effort heartbeat reporting STOPPING when SIGTERM ends the process.
+
+    Its timeout is capped well below the default: systemd sends SIGKILL after its stop timeout,
+    and an unreachable backend must not use that time up before the run's data is finalized.
+    Never raises.
+    """
+    capped = replace(config, heartbeat=replace(
+        config.heartbeat, timeout_s=min(config.heartbeat.timeout_s, _STOPPING_HEARTBEAT_TIMEOUT_S),
+    ))
+    _send_terminal_heartbeat(capped, RunPhaseState.STOPPING, None, "")
+
+
+def shutdown(
+    config: AppConfig, reason: str, command_id: Any | None = None, config_path: Path | None = None,
+) -> None:
     """Runs the one shutdown sequence every shutdown trigger uses, regardless of why.
 
     Finalizes and uploads whatever data exists, logs why, sends one last best-effort heartbeat,
-    then powers down the modem, signals completion, and shuts the system down. The sequence
+    then powers down the modem and shuts the system down. The sequence
     never branches on `reason` - it only changes what gets logged. `command_id` is set only for
     a remote shutdown-now command, never for an unhandled exception or a failed SIM unlock.
+
+    If `command_id` and `config_path` are both given, the id is persisted for the next boot to
+    ack as successful (see config_sources.py::write_pending_command_ack()). The "received" ack
+    of the terminal heartbeat is a single attempt: if it is lost, the backend redelivers the
+    command after the next power-on, and without the persisted id that boot would shut down again.
     """
     logger.critical("Shutting down (%s)", reason)
     finalize_and_upload_pending(config)
     _send_terminal_heartbeat(config, RunPhaseState.SHUTTING_DOWN, command_id, "shutdown-now")
+    if command_id is not None and config_path is not None:
+        write_pending_command_ack(config_path.parent / PENDING_SHUTDOWN_ACK_FILENAME, command_id)
 
-    if config.system.running_on_pi:
-        signal_completion(config.system.shutdown_gpio)
     perform_shutdown(config.modem)
-    if config.system.running_on_pi:
-        cleanup_gpio()
 
 
 def reboot(
@@ -173,13 +198,11 @@ def reboot(
     """Runs the one reboot sequence every reboot trigger uses, regardless of why.
 
     Finalizes and uploads whatever data exists, logs why, sends one last best-effort heartbeat,
-    then powers down the modem and reboots. Unlike shutdown(), never touches
-    system.shutdown_gpio - that pin signals an external power-management circuit that it's safe
-    to cut power, which doesn't apply here: a reboot keeps the board powered throughout.
+    then powers down the modem and reboots.
 
     If `command_id` and `config_path` are both given (a remote reboot-now, not an unhandled
     exception), persists the command id for the next boot to ack as successful - see
-    config_sources.py::write_pending_reboot_ack(). The "received" ack the terminal heartbeat
+    config_sources.py::write_pending_command_ack(). The "received" ack the terminal heartbeat
     just sent only confirms this process got the command, not that the reboot it's about to run
     actually works.
     """
@@ -187,7 +210,7 @@ def reboot(
     finalize_and_upload_pending(config)
     _send_terminal_heartbeat(config, RunPhaseState.REBOOTING, command_id, "reboot-now")
     if command_id is not None and config_path is not None:
-        write_pending_reboot_ack(config_path.parent / PENDING_REBOOT_ACK_FILENAME, command_id)
+        write_pending_command_ack(config_path.parent / PENDING_REBOOT_ACK_FILENAME, command_id)
     perform_reboot(config.modem)
 
 

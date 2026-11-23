@@ -247,7 +247,14 @@ config.local.*.toml
 
 # Crash escalation state and the last crash report, kept next to config.toml across reboots.
 crash_state.json
+# One-shot "boot into Manual Mode once" marker left by stop-measuring-now.
+manual_next_boot.json
+# Command ids reboot-now/shutdown-now leave for the next boot to ack as successful.
+pending_reboot_ack.toml
+pending_shutdown_ack.toml
 last_crash_report.json
+# Link settings of the last boot whose config loaded, for the emergency link.
+last_good_link_settings.json
 
 # Default upload queue directory (config.toml), created when running from the checkout
 /upload_queue/

@@ -190,7 +190,7 @@ class TestReadFix:
         assert gnss.read_fix() is None
 
     def test_a_corrupted_line_does_not_prevent_reading_the_next_valid_one(self, fake_serials):
-        """Regression for issue #38: a single bad line among otherwise-valid ones must not take
+        """Regression: a single bad line among otherwise-valid ones must not take
         down the whole run - the caller can just keep reading."""
         gnss = self._gnss(fake_serials, "")
         fake_serials[0].readline_sequence = [

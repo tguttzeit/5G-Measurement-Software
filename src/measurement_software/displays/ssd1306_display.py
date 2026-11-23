@@ -14,8 +14,7 @@ from measurement_software.displays.display import Display
 class SSD1306Display(Display):
     """Drives a physical SSD1306 OLED over I2C via the luma.oled/luma.core driver libraries.
 
-    Those libraries are imported only inside these methods (same deferred-import pattern as
-    RPi.GPIO in core/system.py), since they depend on Pi-specific I2C access and aren't
+    Those libraries are imported only inside these methods, since they depend on Pi-specific I2C access and aren't
     installed on dev machines - only on a Pi with the display attached, via
     `uv pip install luma.oled`.
     """

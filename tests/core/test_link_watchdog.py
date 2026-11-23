@@ -44,7 +44,7 @@ class FakeProcess:
 
 
 class Harness:
-    def __init__(self, monkeypatch, radio_reset_possible: bool = True, **config):
+    def __init__(self, monkeypatch, radio_reset_possible: bool = True, on_link_up=None, **config):
         self.clock = FakeClock()
         self.link_up = True
         self.started: list[FakeProcess] = []
@@ -62,18 +62,137 @@ class Harness:
             return self.radio_reset_possible
 
         monkeypatch.setattr("measurement_software.core.link_watchdog.start_quectel_cm", fake_start)
-        defaults = dict(restart_after_s=180.0, radio_reset_after_restarts=2)
+        defaults = dict(restart_after_s=180.0, max_restart_interval_s=180.0, radio_reset_after_restarts=2)
         defaults.update(config)
         self.watchdog = LinkWatchdog(
             LinkWatchdogConfig(**defaults), QuectelCmConfig(binary="/usr/bin/quectel-CM"),
-            request_radio_reset, has_ipv4=lambda iface: self.link_up, clock=self.clock,
+            request_radio_reset, has_ipv4=lambda iface: self.has_ipv4(iface), clock=self.clock,
+            on_link_up=on_link_up, sleep=self.sleep,
         )
+        self.link_up_at: float | None = None
+        self.queried_interfaces: list[str] = []
+        self.sleeps: list[float] = []
         self.initial_process = FakeProcess("quectel-CM #0")
         self.watchdog._process = self.initial_process
 
     def check_at(self, t: float) -> None:
         self.clock.now = t
         self.watchdog.check()
+
+    def has_ipv4(self, interface: str) -> bool:
+        self.queried_interfaces.append(interface)
+        if self.link_up_at is not None:
+            return self.clock.now >= self.link_up_at
+        return self.link_up
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.clock.now += seconds
+
+
+class TestWaitForLink:
+    def test_returns_at_once_and_quietly_when_the_link_is_already_up(self, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        h = Harness(monkeypatch)
+
+        assert h.watchdog.wait_for_link(30.0) is True
+        assert h.sleeps == []
+        assert caplog.text == ""
+
+    def test_polls_the_watched_interface_until_it_has_an_address(self, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        h = Harness(monkeypatch, interface="wwan1")
+        h.link_up_at = 1.2
+
+        assert h.watchdog.wait_for_link(30.0) is True
+        assert h.clock.now == pytest.approx(1.5)
+        assert set(h.queried_interfaces) == {"wwan1"}
+        assert "wwan1 is up after 2 s" in caplog.text
+
+    def test_gives_up_after_the_timeout(self, monkeypatch, caplog):
+        caplog.set_level(logging.WARNING)
+        h = Harness(monkeypatch)
+        h.link_up = False
+
+        assert h.watchdog.wait_for_link(30.0) is False
+        assert h.clock.now == pytest.approx(30.0)
+        assert "no IPv4 address after 30 s" in caplog.text
+
+    def test_waits_even_when_the_watchdog_is_disabled(self, monkeypatch):
+        h = Harness(monkeypatch, enabled=False)
+        h.link_up_at = 1.0
+
+        assert h.watchdog.wait_for_link(30.0) is True
+
+
+class TestOnLinkUp:
+    def test_runs_once_when_the_link_is_first_seen_up(self, monkeypatch):
+        calls = []
+        h = Harness(monkeypatch, on_link_up=lambda: calls.append(1) or True)
+
+        h.check_at(0)
+        h.check_at(30)
+
+        assert calls == [1]
+
+    def test_waits_for_the_link_when_it_starts_down(self, monkeypatch):
+        calls = []
+        h = Harness(monkeypatch, on_link_up=lambda: calls.append(1) or True)
+        h.link_up = False
+        h.check_at(0)
+        h.check_at(30)
+        assert calls == []
+
+        h.link_up = True
+        h.check_at(60)
+
+        assert calls == [1]
+
+    def test_a_failure_is_retried_on_the_next_link_up_not_on_the_next_check(self, monkeypatch):
+        results = [False, True]
+        calls = []
+        h = Harness(monkeypatch, on_link_up=lambda: calls.append(1) or results.pop(0))
+
+        h.check_at(0)
+        h.check_at(30)
+        assert calls == [1]
+
+        h.link_up = False
+        h.check_at(60)
+        h.link_up = True
+        h.check_at(90)
+        h.link_up = False
+        h.check_at(120)
+        h.link_up = True
+        h.check_at(150)
+
+        assert calls == [1, 1]
+
+    def test_is_not_run_again_after_it_succeeded(self, monkeypatch):
+        calls = []
+        h = Harness(monkeypatch, on_link_up=lambda: calls.append(1) or True)
+        h.check_at(0)
+        h.link_up = False
+        h.check_at(30)
+        h.link_up = True
+        h.check_at(60)
+
+        assert calls == [1]
+
+    def test_a_raising_callback_is_left_to_the_thread_loop_and_not_retried_on_the_next_check(self, monkeypatch):
+        calls = []
+
+        def failing():
+            calls.append(1)
+            raise RuntimeError("boom")
+
+        h = Harness(monkeypatch, on_link_up=failing)
+
+        with pytest.raises(RuntimeError):
+            h.check_at(0)
+        h.check_at(30)
+
+        assert calls == [1]
 
 
 class TestLinkWatchdog:
@@ -179,6 +298,16 @@ class TestLinkWatchdog:
         assert len(h.started) == 1
         assert "had already exited" in caplog.text
 
+    def test_reports_the_quectel_cm_it_currently_supervises(self, monkeypatch):
+        h = Harness(monkeypatch)
+        assert h.watchdog.process is h.initial_process
+        h.link_up = False
+        h.check_at(0)
+
+        h.check_at(180)
+
+        assert h.watchdog.process is h.started[0]
+
     def test_a_quectel_cm_ignoring_terminate_is_killed(self, monkeypatch):
         h = Harness(monkeypatch)
         h.initial_process = h.watchdog._process = FakeProcess("quectel-CM #0", ignores_terminate=True)
@@ -189,6 +318,55 @@ class TestLinkWatchdog:
 
         assert h.initial_process.calls == ["terminate", "kill"]
         assert len(h.started) == 1
+
+
+class TestBackoff:
+    """Where no link can be established at all, recovery steps come further and further apart."""
+
+    def step_times(self, h: Harness, until: float) -> list[float]:
+        times = []
+        for t in range(0, int(until) + 1, 30):
+            before = len(h.started) + h.radio_resets
+            h.check_at(t)
+            if len(h.started) + h.radio_resets > before:
+                times.append(t)
+        return times
+
+    def test_the_interval_doubles_with_every_step_up_to_the_maximum(self, monkeypatch):
+        h = Harness(monkeypatch, max_restart_interval_s=720.0)
+        h.link_up = False
+
+        assert self.step_times(h, 3000) == [180, 540, 1260, 1980, 2700]
+
+    def test_radio_resets_count_as_steps_too(self, monkeypatch):
+        h = Harness(monkeypatch, max_restart_interval_s=10_000.0, radio_reset_after_restarts=1)
+        h.link_up = False
+
+        assert self.step_times(h, 2700) == [180, 540, 1260, 2700]
+        assert (len(h.started), h.radio_resets) == (2, 2)
+
+    def test_the_interval_starts_over_after_the_link_was_up(self, monkeypatch):
+        h = Harness(monkeypatch, max_restart_interval_s=10_000.0)
+        h.link_up = False
+        assert self.step_times(h, 600) == [180, 540]
+
+        h.link_up = True
+        h.check_at(630)
+        h.link_up = False
+        h.check_at(660)
+        h.check_at(810)
+        assert len(h.started) == 2
+        h.check_at(840)
+        assert len(h.started) == 3
+
+    def test_never_gives_up(self, monkeypatch):
+        h = Harness(monkeypatch, max_restart_interval_s=360.0)
+        h.link_up = False
+
+        steps = self.step_times(h, 50_000)
+
+        assert len(steps) > 100
+        assert {b - a for a, b in zip(steps[1:], steps[2:])} == {360}
 
 
 class TestLifecycle:

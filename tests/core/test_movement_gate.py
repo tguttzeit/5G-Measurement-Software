@@ -72,7 +72,7 @@ class FakeGNSSReceiver(GNSSReceiver):
 class BurstingFakeGNSSReceiver(GNSSReceiver):
     """Models a receiver reopened every poll whose read window restarts at the same phase of its
     NMEA report cycle each time - `non_gga_reads_per_poll` non-GGA sentences before the next
-    poll's fix becomes readable. Used to reproduce issue #38's "GGA structurally missed" scenario,
+    poll's fix becomes readable. Reproduces the "GGA structurally missed" scenario,
     where a per-poll read cap smaller than the burst can never see a fix no matter how many times
     it polls - unlike `FakeGNSSReceiver`, whose scripted reads advance across polls regardless of
     where a poll's cap cuts off.
@@ -134,86 +134,91 @@ def gate(gnss_receiver, run_phase=None, clock_sync=None, gps_fix_status=None, **
 
 
 class TestWaitForMovement:
-    def test_sets_run_phase_to_waiting_for_gps_fix_before_any_fix_is_obtained(self, no_sleep):
+    def test_sets_run_phase_to_waiting_for_movement_before_the_first_poll(self, no_sleep):
         run_phase = RunPhase()
-        receiver = FakeGNSSReceiver([None])
+        phases = []
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
 
-        with pytest.raises(RuntimeError, match="ran out of scripted fixes"):
-            _run_bounded(gate(receiver, run_phase, confirmations_required=2), max_polls=1)
+        gate(receiver, run_phase).wait_for_movement(
+            HOME, on_check_remote_shutdown=lambda: phases.append(run_phase.get()),
+        )
 
-        assert run_phase.get() == RunPhaseState.WAITING_FOR_GPS_FIX.value
+        assert phases[0] == RunPhaseState.WAITING_FOR_MOVEMENT.value
 
-    def test_transitions_to_waiting_for_movement_once_a_fix_is_obtained(self, no_sleep):
+    def test_never_reports_waiting_for_gps_fix_itself(self, no_sleep):
         run_phase = RunPhase()
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        phases = []
+        receiver = FakeGNSSReceiver([None, fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
 
-        gate(receiver, run_phase).wait_for_movement()
+        gate(receiver, run_phase).wait_for_movement(
+            HOME, on_check_remote_shutdown=lambda: phases.append(run_phase.get()),
+        )
 
-        assert run_phase.get() == RunPhaseState.WAITING_FOR_MOVEMENT.value
+        assert set(phases) == {RunPhaseState.WAITING_FOR_MOVEMENT.value}
 
     def test_records_every_fix_read_into_the_shared_gps_fix_status(self, no_sleep):
         gps_fix_status = GpsFixStatusTracker()
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
 
-        gate(receiver, gps_fix_status=gps_fix_status).wait_for_movement()
+        gate(receiver, gps_fix_status=gps_fix_status).wait_for_movement(HOME)
 
         status = gps_fix_status.status()
         assert status.has_fix is True
         assert status.num_satellites == 8
 
     def test_returns_once_movement_is_confirmed_for_required_consecutive_polls(self, no_sleep):
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
 
-        gate(receiver, confirmations_required=2).wait_for_movement()
+        gate(receiver, confirmations_required=2).wait_for_movement(HOME)
 
-        # Poll 1 sets the reference, polls 2 and 3 both confirm - 2 consecutive confirmations.
-        assert receiver.calls.count("read") == 3
+        # Both polls clear the threshold against the reference - 2 consecutive confirmations.
+        assert receiver.calls.count("read") == 2
 
     def test_does_not_return_after_a_single_confirmation_below_required_count(self, no_sleep):
         receiver = FakeGNSSReceiver([
-            fix(HOME), fix(FAR_FROM_HOME), fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME),
+            fix(FAR_FROM_HOME), fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME),
         ])
 
-        gate(receiver, confirmations_required=2).wait_for_movement()
+        gate(receiver, confirmations_required=2).wait_for_movement(HOME)
 
         # A confirmation not immediately followed by another resets the streak; the gate only
-        # returns once two *consecutive* polls confirm (polls 4 and 5 here).
-        assert receiver.calls.count("read") == 5
+        # returns once two *consecutive* polls confirm (polls 3 and 4 here).
+        assert receiver.calls.count("read") == 4
 
     def test_a_single_reading_never_returns_when_two_confirmations_are_required(self, no_sleep):
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME)])
 
         with pytest.raises(RuntimeError, match="ran out of scripted fixes"):
             _run_bounded(gate(receiver, confirmations_required=2), max_polls=3)
 
     def test_falls_back_to_movement_only_when_home_position_is_unset(self, no_sleep):
-        receiver = FakeGNSSReceiver([fix(HOME), fix(NEAR_HOME), fix(NEAR_HOME)])
+        receiver = FakeGNSSReceiver([fix(NEAR_HOME), fix(NEAR_HOME)])
 
-        gate(receiver, confirmations_required=2, home_latitude=None, home_longitude=None).wait_for_movement()
+        gate(receiver, confirmations_required=2, home_latitude=None, home_longitude=None).wait_for_movement(HOME)
 
-        assert receiver.calls.count("read") == 3
+        assert receiver.calls.count("read") == 2
 
     def test_requires_home_departure_when_home_position_is_configured(self, no_sleep):
         # NEAR_HOME clears the movement threshold but not home_departure_threshold - never confirms.
-        receiver = FakeGNSSReceiver([fix(HOME), fix(NEAR_HOME), fix(NEAR_HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(NEAR_HOME), fix(NEAR_HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
 
         gate(
             receiver, confirmations_required=2,
             home_latitude=HOME.latitude, home_longitude=HOME.longitude,
             home_departure_threshold=200.0,
-        ).wait_for_movement()
+        ).wait_for_movement(HOME)
 
-        assert receiver.calls.count("read") == 5
+        assert receiver.calls.count("read") == 4
 
     def test_opens_and_closes_the_receiver_once_per_poll(self, no_sleep):
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
 
-        gate(receiver, confirmations_required=2).wait_for_movement()
+        gate(receiver, confirmations_required=2).wait_for_movement(HOME)
 
-        assert receiver.calls == ["open", "read", "read_gnss_diagnostic", "close"] * 3
+        assert receiver.calls == ["open", "read", "read_gnss_diagnostic", "close"] * 2
 
     def test_finds_a_gga_fix_past_a_realistic_multi_constellation_burst_of_other_sentences(self, no_sleep):
-        """Regression for issue #38: a real multi-constellation NMEA receiver (GPS + GLONASS +
+        """Regression: a real multi-constellation NMEA receiver (GPS + GLONASS +
         Galileo + BeiDou, say) emits a burst of GLL/GSA/GSV/RMC/VTG sentences - none of them GGA -
         every report cycle, well past the old cap of 10 reads per poll before GGA comes back
         around. Because the receiver is reopened on every poll, the read window restarts at the
@@ -232,25 +237,24 @@ class TestWaitForMovement:
     def test_retries_within_a_poll_when_a_read_returns_none(self, no_sleep):
         # First poll: two None reads (e.g. non-GGA sentences) before a usable fix.
         receiver = FakeGNSSReceiver([
-            None, None, fix(HOME),
-            fix(FAR_FROM_HOME), fix(FAR_FROM_HOME),
+            None, None, fix(FAR_FROM_HOME),
+            fix(FAR_FROM_HOME),
         ])
 
-        gate(receiver, confirmations_required=2).wait_for_movement()
+        gate(receiver, confirmations_required=2).wait_for_movement(HOME)
 
         assert receiver.calls == (
             ["open", "read", "read", "read", "read_gnss_diagnostic", "close"]
             + ["open", "read", "read_gnss_diagnostic", "close"]
-            + ["open", "read", "read_gnss_diagnostic", "close"]
         )
 
     def test_sleeps_the_configured_poll_interval_between_polls(self, no_sleep):
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
 
-        gate(receiver, confirmations_required=2, poll_interval_s=45.0).wait_for_movement()
+        gate(receiver, confirmations_required=2, poll_interval_s=45.0).wait_for_movement(HOME)
 
         # No sleep after the poll that confirms movement and returns - only between polls.
-        assert no_sleep == [45.0, 45.0]
+        assert no_sleep == [45.0]
 
     def test_never_terminates_on_reads_that_all_time_out_within_a_poll(self, no_sleep):
         receiver = FakeGNSSReceiver([None] * 30)
@@ -261,35 +265,35 @@ class TestWaitForMovement:
 
 class TestWaitForMovementRemoteShutdownHook:
     def test_calls_on_check_remote_shutdown_once_per_poll_before_polling(self, no_sleep):
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
         calls: list[int] = []
 
         def on_check_remote_shutdown():
             calls.append(1)
 
         gate(receiver, confirmations_required=2).wait_for_movement(
-            on_check_remote_shutdown=on_check_remote_shutdown,
+            HOME, on_check_remote_shutdown=on_check_remote_shutdown,
         )
 
-        # One call per poll (3 polls here), each before that poll's read - not fewer, not more.
-        assert len(calls) == 3
+        # One call per poll (2 polls here), each before that poll's read - not fewer, not more.
+        assert len(calls) == 2
 
     def test_propagates_an_exception_from_on_check_remote_shutdown_without_polling_first(self, no_sleep):
-        receiver = FakeGNSSReceiver([fix(HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME)])
 
         def on_check_remote_shutdown():
             raise RuntimeError("remote shutdown-now command received")
 
         with pytest.raises(RuntimeError, match="remote shutdown-now command received"):
-            gate(receiver).wait_for_movement(on_check_remote_shutdown=on_check_remote_shutdown)
+            gate(receiver).wait_for_movement(HOME, on_check_remote_shutdown=on_check_remote_shutdown)
 
         # The hook fires before the gate ever touches the GNSS receiver.
         assert receiver.calls == []
 
     def test_defaults_to_no_hook_without_breaking_the_wait(self, no_sleep):
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
 
-        gate(receiver, confirmations_required=2).wait_for_movement()
+        gate(receiver, confirmations_required=2).wait_for_movement(HOME)
 
         assert receiver.calls != []
 
@@ -297,44 +301,43 @@ class TestWaitForMovementRemoteShutdownHook:
 class TestClockSyncIntegration:
     def test_syncs_the_clock_from_the_first_datetime_reading(self, no_sleep):
         dt = datetime(2026, 7, 4, 20, 15, 30, tzinfo=UTC)
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)], datetimes=[dt])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)], datetimes=[dt])
         clock_sync = FakeClockSync(synced=False)
 
-        gate(receiver, clock_sync=clock_sync, confirmations_required=2).wait_for_movement()
+        gate(receiver, clock_sync=clock_sync, confirmations_required=2).wait_for_movement(HOME)
 
         assert clock_sync.sync_calls == [dt]
 
     def test_reads_a_datetime_on_every_poll_until_synced(self, no_sleep):
         # No datetimes scripted - clock_sync never syncs, so every poll keeps trying.
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
         clock_sync = FakeClockSync(synced=False)
 
-        gate(receiver, clock_sync=clock_sync, confirmations_required=2).wait_for_movement()
+        gate(receiver, clock_sync=clock_sync, confirmations_required=2).wait_for_movement(HOME)
 
-        assert receiver.calls == ["open", "read", "read_datetime", "read_gnss_diagnostic", "close"] * 3
+        assert receiver.calls == ["open", "read", "read_datetime", "read_gnss_diagnostic", "close"] * 2
 
     def test_does_not_read_a_datetime_once_already_synced(self, no_sleep):
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
         clock_sync = FakeClockSync(synced=True)
 
-        gate(receiver, clock_sync=clock_sync, confirmations_required=2).wait_for_movement()
+        gate(receiver, clock_sync=clock_sync, confirmations_required=2).wait_for_movement(HOME)
 
         assert "read_datetime" not in receiver.calls
 
     def test_stops_reading_a_datetime_once_synced_mid_wait(self, no_sleep):
         dt = datetime(2026, 7, 4, 20, 15, 30, tzinfo=UTC)
         receiver = FakeGNSSReceiver(
-            [fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)], datetimes=[dt, dt],
+            [fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)], datetimes=[dt, dt],
         )
         clock_sync = FakeClockSync(synced=False)
 
-        gate(receiver, clock_sync=clock_sync, confirmations_required=2).wait_for_movement()
+        gate(receiver, clock_sync=clock_sync, confirmations_required=2).wait_for_movement(HOME)
 
-        # Synced on the first poll's datetime read - the second and third polls read no more.
+        # Synced on the first poll's datetime read - the second poll reads no more.
         assert clock_sync.sync_calls == [dt]
         assert receiver.calls == (
             ["open", "read", "read_datetime", "read_gnss_diagnostic", "close"]
-            + ["open", "read", "read_gnss_diagnostic", "close"]
             + ["open", "read", "read_gnss_diagnostic", "close"]
         )
 
@@ -343,27 +346,27 @@ class TestDiagnosticIntegration:
     def test_records_a_diagnostic_read_on_any_poll_into_the_shared_gps_fix_status(self, no_sleep):
         gps_fix_status = GpsFixStatusTracker()
         receiver = FakeGNSSReceiver(
-            [fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)], diagnostics=["ANTENNA SHORT"],
+            [fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)], diagnostics=["ANTENNA SHORT"],
         )
 
-        gate(receiver, gps_fix_status=gps_fix_status, confirmations_required=2).wait_for_movement()
+        gate(receiver, gps_fix_status=gps_fix_status, confirmations_required=2).wait_for_movement(HOME)
 
         assert gps_fix_status.status().diagnostic == "Antenna short circuit"
 
     def test_reads_a_diagnostic_on_every_poll_unconditionally(self, no_sleep):
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
         clock_sync = FakeClockSync(synced=True)
 
-        gate(receiver, clock_sync=clock_sync, confirmations_required=2).wait_for_movement()
+        gate(receiver, clock_sync=clock_sync, confirmations_required=2).wait_for_movement(HOME)
 
         # Unlike read_datetime (which stops once synced), read_gnss_diagnostic runs every poll.
-        assert receiver.calls.count("read_gnss_diagnostic") == 3
+        assert receiver.calls.count("read_gnss_diagnostic") == 2
 
     def test_leaves_diagnostic_unset_when_none_is_ever_read(self, no_sleep):
         gps_fix_status = GpsFixStatusTracker()
-        receiver = FakeGNSSReceiver([fix(HOME), fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
+        receiver = FakeGNSSReceiver([fix(FAR_FROM_HOME), fix(FAR_FROM_HOME)])
 
-        gate(receiver, gps_fix_status=gps_fix_status, confirmations_required=2).wait_for_movement()
+        gate(receiver, gps_fix_status=gps_fix_status, confirmations_required=2).wait_for_movement(HOME)
 
         assert gps_fix_status.status().diagnostic is None
 
@@ -381,4 +384,4 @@ def _run_bounded(movement_gate: MovementGate, max_polls: int) -> None:
         return original_poll()
 
     movement_gate._poll_fix = bounded_poll
-    movement_gate.wait_for_movement()
+    movement_gate.wait_for_movement(HOME)

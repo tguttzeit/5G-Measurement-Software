@@ -63,10 +63,10 @@ class TestDecision:
         assert decision.same_error_count == 1
         assert decision.consecutive_reboots == 0
 
-    def test_same_error_reaching_the_limit_escalates_to_waiting_mode(self, policy):
+    def test_same_error_reaching_the_limit_escalates_to_the_recovery_state(self, policy):
         actions = [policy.record(raise_from_here(ValueError())).action for _ in range(3)]
 
-        assert actions == [CrashAction.REBOOT, CrashAction.REBOOT, CrashAction.ESCALATE_TO_WAITING]
+        assert actions == [CrashAction.REBOOT, CrashAction.REBOOT, CrashAction.RECOVERY]
 
     def test_a_different_error_restarts_the_same_error_count(self, policy):
         policy.record(raise_from_here(ValueError()))
@@ -80,7 +80,7 @@ class TestDecision:
         errors = [raise_from_here, raise_elsewhere] * 3
         actions = [policy.record(make(ValueError())).action for make in errors]
 
-        assert actions == [CrashAction.REBOOT] * 5 + [CrashAction.ESCALATE_TO_WAITING]
+        assert actions == [CrashAction.REBOOT] * 5 + [CrashAction.RECOVERY]
 
     def test_counters_survive_a_new_policy_instance_as_after_a_reboot(self, tmp_path):
         CrashPolicy(tmp_path, same_error_limit=3, reboot_limit=5).record(raise_from_here(ValueError()))
@@ -88,9 +88,9 @@ class TestDecision:
 
         decision = CrashPolicy(tmp_path, same_error_limit=3, reboot_limit=5).record(raise_from_here(ValueError()))
 
-        assert decision.action is CrashAction.ESCALATE_TO_WAITING
+        assert decision.action is CrashAction.RECOVERY
 
-    def test_any_error_after_escalating_to_waiting_mode_enters_maintenance(self, policy):
+    def test_any_error_after_escalating_to_the_recovery_state_enters_maintenance(self, policy):
         for _ in range(3):
             policy.record(raise_from_here(ValueError()))
         assert not policy.in_maintenance()
@@ -99,7 +99,7 @@ class TestDecision:
 
         assert decision.action is CrashAction.ENTER_MAINTENANCE
         assert policy.in_maintenance()
-        assert policy.maintenance_details()["fingerprint"] == decision.fingerprint
+        assert policy.details()["fingerprint"] == decision.fingerprint
 
     def test_maintenance_survives_a_new_policy_instance_and_further_errors(self, policy, tmp_path):
         for _ in range(4):
@@ -109,6 +109,68 @@ class TestDecision:
 
         assert again.in_maintenance()
         assert again.record(raise_from_here(ValueError())).action is CrashAction.ENTER_MAINTENANCE
+
+    def test_the_recovery_state_is_reported_until_it_is_consumed(self, policy):
+        assert not policy.in_recovery()
+        for _ in range(3):
+            policy.record(raise_from_here(ValueError()))
+
+        assert policy.in_recovery()
+        assert not policy.in_maintenance()
+
+        policy.consume_recovery()
+
+        assert not policy.in_recovery()
+        assert not policy.in_maintenance()
+
+    def test_consuming_keeps_the_counters_and_survives_a_new_policy_instance(self, policy, tmp_path):
+        for _ in range(3):
+            policy.record(raise_from_here(ValueError()))
+        details = policy.details()
+
+        policy.consume_recovery()
+
+        again = CrashPolicy(tmp_path, same_error_limit=3, reboot_limit=5)
+        assert not again.in_recovery()
+        assert again.details() == details
+        assert details == {"fingerprint": details["fingerprint"], "same_error_count": 3, "consecutive_reboots": 3}
+
+    def test_consuming_without_a_recovery_state_changes_nothing(self, policy, tmp_path):
+        policy.consume_recovery()
+        assert not (tmp_path / CRASH_STATE_FILENAME).exists()
+
+        policy.record(raise_from_here(ValueError()))
+        before = (tmp_path / CRASH_STATE_FILENAME).read_text()
+        policy.consume_recovery()
+
+        assert (tmp_path / CRASH_STATE_FILENAME).read_text() == before
+
+    @pytest.mark.parametrize("error", [ValueError, KeyError])
+    def test_a_crash_after_consuming_the_recovery_ends_in_maintenance_not_in_another_recovery(self, policy, error):
+        for _ in range(3):
+            policy.record(raise_from_here(ValueError()))
+        policy.consume_recovery()
+
+        decision = policy.record(raise_from_here(error()))
+
+        assert decision.action is CrashAction.ENTER_MAINTENANCE
+        assert policy.in_maintenance()
+
+    def test_a_normal_run_after_consuming_the_recovery_clears_everything(self, policy):
+        for _ in range(3):
+            policy.record(raise_from_here(ValueError()))
+        policy.consume_recovery()
+
+        policy.reset()
+
+        assert policy.record(raise_from_here(ValueError())).action is CrashAction.REBOOT
+
+    def test_a_state_file_with_the_former_waiting_escalation_counts_as_recovery(self, policy, tmp_path):
+        (tmp_path / CRASH_STATE_FILENAME).write_text(json.dumps(
+            {"fingerprint": "X@y:z", "same_error_count": 3, "consecutive_reboots": 2, "escalation": "waiting"}
+        ))
+
+        assert policy.in_recovery()
 
     def test_a_normal_run_after_escalating_clears_the_escalation(self, policy):
         for _ in range(3):

@@ -1,14 +1,12 @@
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from typing import Callable
 
-from measurement_software.core.config import AppConfig, UploaderConfig
+from measurement_software.core.config import AppConfig
 from measurement_software.remote.heartbeat import HeartbeatSender
 from measurement_software.core.system import KeepModemAliveSender
 from measurement_software.core.uploader import Uploader
-from measurement_software.core.util import utc_timestamp
 from measurement_software.displays import create_display
 from measurement_software.selftests.selftest_results import CheckResult, CheckStatus
 from measurement_software.status.backend_status import RunStatusTracker, StorageStatusReporter
@@ -25,8 +23,8 @@ BACKEND_TEST_TYPES = frozenset({"modem", "gps", "collector", "uploader", "heartb
 # several NMEA sentence types per second (GSA/GSV/GLL/RMC/... alongside GGA) and read_fix() reads
 # only whatever line comes next - a single call has a real chance of landing on a non-GGA line
 # even with a genuinely live fix. Confirmed live: a bare single-call check flip-flopped
-# PASS/FAIL against a real, continuously-available fix. Collector._wait_for_first_fix() already
-# loops for exactly this reason; these checks need the same pattern.
+# PASS/FAIL against a real, continuously-available fix. FirstFixWaiter already loops for exactly
+# this reason; these checks need the same pattern.
 _GPS_FIX_WAIT_TIMEOUT_S = 5.0
 
 
@@ -97,32 +95,16 @@ def check_collector(config: AppConfig) -> CheckResult:
     return _passed("collector", start, details={"num_satellites": fix.num_satellites, "cell_samples": len(samples)})
 
 
-def check_uploader(config: AppConfig, *, confirm_side_effects: bool) -> CheckResult:
-    """Checks network reachability for uploads; with confirmation, also uploads one throwaway file."""
+def check_uploader(config: AppConfig) -> CheckResult:
+    """Checks that a network interface the uploader would use is up.
+
+    Reaching and authenticating against the backend is covered by check_heartbeat, which posts to
+    the same backend with the same device key; a real upload is deliberately not attempted.
+    """
     start = time.monotonic()
     if not (Uploader._is_interface_up("wlan0") or Uploader._is_interface_up("wwan0")):
         return _failed("uploader", start, "No network interface (wlan0/wwan0) has an IPv4 address.")
-    if not confirm_side_effects:
-        return _passed("uploader", start, details={"network_reachable": True, "real_upload_attempted": False})
-    return _upload_throwaway_probe(config.uploader, start)
-
-
-def _upload_throwaway_probe(config: UploaderConfig, start: float) -> CheckResult:
-    """Uploads one small, clearly-marked throwaway file via scp, never touching upload_dir.
-
-    Kept entirely out of upload_dir's own *.json glob so a failed probe can never be picked up
-    and retried by the normal upload_pending_files() sweep.
-    """
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        probe = Path(tmp_dir) / f"selftest_probe_{utc_timestamp()}.json"
-        probe.write_text('{"selftest": true}')
-        remote = f"{config.upload_user}@{config.upload_host}:{config.remote_dir}{probe.name}"
-        proc = subprocess.run(
-            ["scp", "-P", str(config.upload_port), str(probe), remote], capture_output=True, text=True,
-        )
-    if proc.returncode == 0:
-        return _passed("uploader", start, details={"network_reachable": True, "real_upload_attempted": True})
-    return _failed("uploader", start, f"scp exited with code {proc.returncode}")
+    return _passed("uploader", start, details={"network_reachable": True})
 
 
 def check_heartbeat(config: AppConfig) -> CheckResult:
@@ -218,15 +200,15 @@ def _elapsed_ms(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
 
-_CHECKS: dict[str, Callable[[AppConfig, bool], CheckResult]] = {
-    "modem": lambda config, confirm_side_effects: check_modem(config),
-    "gps": lambda config, confirm_side_effects: check_gps(config),
-    "collector": lambda config, confirm_side_effects: check_collector(config),
-    "uploader": lambda config, confirm_side_effects: check_uploader(config, confirm_side_effects=confirm_side_effects),
-    "heartbeat": lambda config, confirm_side_effects: check_heartbeat(config),
-    "keep_modem_alive": lambda config, confirm_side_effects: check_keep_modem_alive(config),
-    "display": lambda config, confirm_side_effects: check_display(config),
-    "latency_tester": lambda config, confirm_side_effects: check_latency_tester(config),
+_CHECKS: dict[str, Callable[[AppConfig], CheckResult]] = {
+    "modem": check_modem,
+    "gps": check_gps,
+    "collector": check_collector,
+    "uploader": check_uploader,
+    "heartbeat": check_heartbeat,
+    "keep_modem_alive": check_keep_modem_alive,
+    "display": check_display,
+    "latency_tester": check_latency_tester,
 }
 
 
@@ -235,10 +217,10 @@ def available_checks() -> list[str]:
     return list(_CHECKS)
 
 
-def run_check(name: str, config: AppConfig, *, confirm_side_effects: bool) -> CheckResult:
+def run_check(name: str, config: AppConfig) -> CheckResult:
     """Runs one named check by dispatching through the check factory-dict."""
     try:
         factory = _CHECKS[name]
     except KeyError:
         raise ValueError(f"Unknown selftest check: {name!r}")
-    return factory(config, confirm_side_effects)
+    return factory(config)

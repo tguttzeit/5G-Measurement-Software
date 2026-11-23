@@ -22,9 +22,10 @@ class MovementGate:
     """Waits, battery-efficiently, for confirmed vehicle movement before a measuring run starts.
 
     Runs entirely on GNSS - the modem and quectel-CM are never touched here - polling at a low
-    duty cycle rather than continuously. Movement only counts once it's
-    sustained across consecutive polls, to tell genuine departure apart from GPS jitter or a
-    brief roll; if a home position is configured, departure from it is required in addition to
+    duty cycle rather than continuously, since the receiver stays powered and emitting either
+    way and only the reads cost anything. Movement only counts once it's sustained across
+    consecutive polls, to tell genuine departure apart from GPS jitter or a brief roll; if a home
+    position is configured, departure from it is required in addition to
     clearing the movement threshold.
 
     Also drives the one-time GNSS clock sync: GNSS is already being read here every poll, so each
@@ -54,19 +55,23 @@ class MovementGate:
         self._clock_sync = clock_sync
         self._gps_fix_status = gps_fix_status
 
-    def wait_for_movement(self, on_check_remote_shutdown: Callable[[], None] | None = None) -> None:
-        """Blocks until sustained displacement (and, if configured, home departure) is confirmed.
+    def wait_for_movement(
+        self, reference: Position, on_check_remote_shutdown: Callable[[], None] | None = None,
+    ) -> None:
+        """Blocks until sustained displacement from `reference` (and, if configured, home
+        departure) is confirmed.
 
+        `reference` is the position of the first GPS fix, which the caller has already waited
+        for (see FirstFixWaiter), so this only ever waits for movement.
         `on_check_remote_shutdown` (Collector.check_remote_shutdown_or_reboot, wired in by
         main.py) is called once per poll and is expected to raise to end the wait -
         shutdown-now/reboot-now would otherwise only take effect once movement is confirmed and
         Collector.collect() actually starts, even though the device is already reachable and
         heartbeating during this wait.
         """
-        self._run_phase.set(RunPhaseState.WAITING_FOR_GPS_FIX)
-        self._logger.info("Waiting for a GPS fix...")
+        self._run_phase.set(RunPhaseState.WAITING_FOR_MOVEMENT)
+        self._logger.debug("Movement gate reference position set: %s", reference)
 
-        reference: Position | None = None
         consecutive_confirmations = 0
 
         while True:
@@ -74,11 +79,7 @@ class MovementGate:
                 on_check_remote_shutdown()
             fix = self._poll_fix()
             if fix is not None:
-                if reference is None:
-                    reference = fix.position
-                    self._run_phase.set(RunPhaseState.WAITING_FOR_MOVEMENT)
-                    self._logger.debug("Movement gate reference position set: %s", reference)
-                elif self._has_departed(reference, fix.position):
+                if self._has_departed(reference, fix.position):
                     consecutive_confirmations += 1
                     if consecutive_confirmations >= self._confirmations_required:
                         self._logger.info(

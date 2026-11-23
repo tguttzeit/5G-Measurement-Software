@@ -1,10 +1,18 @@
+import json
 import logging
 import socket
 from pathlib import Path
 
 import pytest
 
-from measurement_software.core.config import load_config
+from measurement_software.core.config import (
+    LAST_GOOD_LINK_SETTINGS_FILENAME,
+    CollectorConfig,
+    LinkWatchdogConfig,
+    QuectelCmConfig,
+    load_config,
+    load_link_settings,
+)
 
 REQUIRED_SECTIONS = """
 [modem]
@@ -35,18 +43,20 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
 
     assert config.modem.type == "quectel"
     assert config.modem.port == "/dev/ttyUSB2"
-    assert config.uploader.path == "/upload"
+    assert config.uploader.path == "/api/measurements"
+    assert config.uploader.latency_path == "/api/latency-results"
     assert config.backend.url == ""
     assert config.backend.device_key == ""
-    assert config.heartbeat.path == "/heartbeat"
+    assert config.heartbeat.path == "/api/heartbeat"
+    assert config.heartbeat.interval_s == 15.0
     assert config.device.device_id == socket.gethostname()
     assert config.device.mission_type == "ground"
-    assert config.collector.max_idle_time == 200
+    assert config.collector.max_idle_time == 1800
     assert config.collector.gps_enabled is True
     assert config.collector.gps_disabled_poll_interval_s == 5.0
     assert config.movement_gate.enabled is True
     assert config.movement_gate.poll_interval_s == 45.0
-    assert config.movement_gate.movement_threshold == 15.0
+    assert config.movement_gate.movement_threshold == 10.0
     assert config.movement_gate.confirmations_required == 2
     assert config.movement_gate.home_latitude is None
     assert config.movement_gate.home_longitude is None
@@ -54,19 +64,19 @@ def test_load_config_applies_defaults_for_omitted_optional_sections(tmp_path):
     assert config.quectel_cm.binary == "/add/your/quectel-CM/path/here"
     assert config.quectel_cm.args == ()
     assert config.run_status.empty_captures_until_pipeline_broken == 3
-    assert config.heartbeat.enabled is False
+    assert config.heartbeat.enabled is True
     assert config.heartbeat.hmac_secret == ""
     assert config.selftest.results_url == ""
     assert config.gps_fix_test.status_url == ""
     assert config.gps_fix_test.report_interval_s == 2.0
     assert config.gps_fix_test.timeout_s == 300.0
     assert config.storage.low_free_space_warning_bytes == 500_000_000
-    assert config.display.enabled is False
+    assert config.display.enabled is True
     assert config.display.type == "ssd1306"
     assert config.display.i2c_port == 1
     assert config.display.i2c_address == 0x3C
     assert config.display.refresh_interval_s == 2.0
-    assert config.latency_test.enabled is False
+    assert config.latency_test.enabled is True
     assert config.latency_test.host == ""
     assert config.latency_test.flent_binary == "flent"
     assert config.latency_test.baseline_test == "ping"
@@ -309,51 +319,6 @@ empty_captures_until_pipeline_broken = 5
     assert config.run_status.empty_captures_until_pipeline_broken == 5
 
 
-def test_load_config_raises_on_shutdown_and_display_i2c_pin_conflict(tmp_path):
-    content = REQUIRED_SECTIONS + """
-[system]
-shutdown_gpio = 2
-
-[display]
-enabled = true
-"""
-    with pytest.raises(ValueError, match="GPIO pin conflict"):
-        load_config(write_config(tmp_path, content))
-
-
-def test_load_config_does_not_raise_on_display_i2c_pin_conflict_when_display_disabled(tmp_path):
-    content = REQUIRED_SECTIONS + """
-[system]
-shutdown_gpio = 2
-
-[display]
-enabled = false
-"""
-    config = load_config(write_config(tmp_path, content))
-
-    assert config.system.shutdown_gpio == 2
-    assert config.display.enabled is False
-
-
-def required_sections_with_gnss_port(port: str) -> str:
-    return """
-[modem]
-type = "quectel"
-port = "/dev/ttyUSB2"
-baud_rate = 115200
-timeout = 1.0
-
-[gnss_receiver]
-type = "quectel"
-port = \"""" + port + """\"
-baud_rate = 9600
-timeout = 1.0
-
-[uploader]
-upload_dir = "/data/uploads"
-"""
-
-
 def test_load_config_merges_sibling_config_overrides_file(tmp_path):
     config_path = write_config(tmp_path, REQUIRED_SECTIONS)
     (tmp_path / "config_overrides.toml").write_text('collector_position_threshold = 30.0\nidle_threshold_s = 600\n')
@@ -368,27 +333,21 @@ def test_load_config_without_overrides_file_uses_defaults(tmp_path):
     config = load_config(write_config(tmp_path, REQUIRED_SECTIONS))
 
     assert config.collector.position_threshold == 15
-    assert config.collector.max_idle_time == 200
+    assert config.collector.max_idle_time == 1800
 
 
-def test_load_config_raises_on_shutdown_and_gnss_onboard_uart_pin_conflict(tmp_path):
-    content = required_sections_with_gnss_port("/dev/serial0") + """
+def test_load_config_ignores_removed_shutdown_gpio_with_a_warning(tmp_path, caplog):
+    content = REQUIRED_SECTIONS + """
 [system]
-shutdown_gpio = 14
+shutdown_gpio = 17
+running_on_pi = false
 """
-    with pytest.raises(ValueError, match="GPIO pin conflict"):
-        load_config(write_config(tmp_path, content))
+    with caplog.at_level(logging.WARNING):
+        config = load_config(write_config(tmp_path, content))
 
-
-def test_load_config_does_not_raise_on_gnss_uart_pin_conflict_for_usb_adapter_port(tmp_path):
-    content = required_sections_with_gnss_port("/dev/ttyUSB3") + """
-[system]
-shutdown_gpio = 14
-"""
-    config = load_config(write_config(tmp_path, content))
-
-    assert config.system.shutdown_gpio == 14
-    assert config.gnss_receiver.port == "/dev/ttyUSB3"
+    assert config.system.running_on_pi is False
+    assert not hasattr(config.system, "shutdown_gpio")
+    assert caplog.text.count("system.shutdown_gpio") == 1
 
 
 def test_load_config_defaults_system_mode_to_auto(tmp_path):
@@ -397,14 +356,14 @@ def test_load_config_defaults_system_mode_to_auto(tmp_path):
     assert config.system.mode == "auto"
 
 
-def test_load_config_reads_system_mode_waiting(tmp_path):
+def test_load_config_reads_system_mode_manual(tmp_path):
     content = REQUIRED_SECTIONS + """
 [system]
-mode = "waiting"
+mode = "manual"
 """
     config = load_config(write_config(tmp_path, content))
 
-    assert config.system.mode == "waiting"
+    assert config.system.mode == "manual"
 
 
 def test_load_config_leaves_modem_port_unset_for_by_id_lookup_when_omitted(tmp_path):
@@ -440,16 +399,47 @@ def test_load_config_defaults_crash_limits_and_link_watchdog(tmp_path):
     assert config.link_watchdog.enabled is True
     assert config.link_watchdog.interface == "wwan0"
     assert config.link_watchdog.restart_after_s == 180.0
+    assert config.link_watchdog.max_restart_interval_s == 1800.0
     assert config.link_watchdog.radio_reset_after_restarts == 2
     assert config.heartbeat.success_log_interval_s == 600.0
 
 
+def test_load_config_accepts_a_maximum_interval_equal_to_the_first(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[link_watchdog]
+restart_after_s = 300.0
+max_restart_interval_s = 300.0
+"""
+    assert load_config(write_config(tmp_path, content)).link_watchdog.max_restart_interval_s == 300.0
+
+
+def test_load_config_defaults_clock_to_no_ntp_server(tmp_path):
+    config = load_config(write_config(tmp_path, REQUIRED_SECTIONS))
+
+    assert config.clock.ntp_server == ""
+    assert config.clock.ntp_timeout_s == 3.0
+
+
+def test_load_config_reads_the_clock_section(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[clock]
+ntp_server = "192.0.2.10"
+ntp_timeout_s = 5.0
+"""
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.clock.ntp_server == "192.0.2.10"
+    assert config.clock.ntp_timeout_s == 5.0
+
+
 @pytest.mark.parametrize(("section", "setting", "message"), [
+    ("clock", "ntp_timeout_s = 0", "clock.ntp_timeout_s"),
     ("system", "crash_same_error_limit = 0", "system.crash_same_error_limit"),
     ("system", "crash_reboot_limit = 0", "system.crash_reboot_limit"),
     ("link_watchdog", "restart_after_s = 0", "link_watchdog.restart_after_s"),
     ("link_watchdog", "check_interval_s = -1", "link_watchdog.check_interval_s"),
     ("link_watchdog", "radio_reset_after_restarts = -1", "link_watchdog.radio_reset_after_restarts"),
+    ("link_watchdog", "max_restart_interval_s = 179.0", "link_watchdog.max_restart_interval_s"),
 ])
 def test_load_config_raises_on_invalid_crash_or_watchdog_settings(tmp_path, section, setting, message):
     content = REQUIRED_SECTIONS + f"""
@@ -471,20 +461,48 @@ mode = "bogus"
 
 def test_load_config_applies_system_mode_from_the_overrides_file(tmp_path):
     config_path = write_config(tmp_path, REQUIRED_SECTIONS)
-    (tmp_path / "config_overrides.toml").write_text('system_mode = "waiting"\n')
+    (tmp_path / "config_overrides.toml").write_text('system_mode = "manual"\n')
 
-    assert load_config(config_path).system.mode == "waiting"
+    assert load_config(config_path).system.mode == "manual"
 
 
 def test_load_config_overrides_file_mode_takes_precedence_over_config_toml(tmp_path):
     content = REQUIRED_SECTIONS + """
 [system]
-mode = "waiting"
+mode = "manual"
 """
     config_path = write_config(tmp_path, content)
     (tmp_path / "config_overrides.toml").write_text('system_mode = "auto"\n')
 
     assert load_config(config_path).system.mode == "auto"
+
+
+def test_load_config_reads_the_legacy_waiting_mode_from_the_overrides_file_as_manual(tmp_path):
+    config_path = write_config(tmp_path, REQUIRED_SECTIONS)
+    (tmp_path / "config_overrides.toml").write_text('system_mode = "waiting"\n')
+
+    assert load_config(config_path).system.mode == "manual"
+
+
+def test_load_config_reads_the_legacy_waiting_mode_in_config_toml_as_manual(tmp_path, caplog):
+    content = REQUIRED_SECTIONS + """
+[system]
+mode = "waiting"
+"""
+    with caplog.at_level(logging.WARNING):
+        config = load_config(write_config(tmp_path, content))
+
+    assert config.system.mode == "manual"
+    assert [r.message for r in caplog.records if "waiting" in r.message and r.levelno == logging.WARNING]
+
+
+def test_load_config_still_rejects_a_case_variant_of_the_legacy_mode_in_config_toml(tmp_path):
+    content = REQUIRED_SECTIONS + """
+[system]
+mode = "Waiting"
+"""
+    with pytest.raises(ValueError, match="system.mode"):
+        load_config(write_config(tmp_path, content))
 
 
 def test_load_config_ignores_an_invalid_mode_in_the_overrides_file(tmp_path):
@@ -496,14 +514,14 @@ def test_load_config_ignores_an_invalid_mode_in_the_overrides_file(tmp_path):
 
 def test_load_config_no_longer_reads_a_mode_override_file(tmp_path):
     config_path = write_config(tmp_path, REQUIRED_SECTIONS)
-    (tmp_path / "mode_override.toml").write_text('mode = "waiting"\n')
+    (tmp_path / "mode_override.toml").write_text('mode = "manual"\n')
 
     assert load_config(config_path).system.mode == "auto"
 
 
 def test_load_config_ignores_system_mode_in_config_local_toml(tmp_path):
     config_path = write_config(tmp_path, REQUIRED_SECTIONS)
-    (tmp_path / "config.local.toml").write_text('[system]\nmode = "waiting"\n')
+    (tmp_path / "config.local.toml").write_text('[system]\nmode = "manual"\n')
 
     assert load_config(config_path).system.mode == "auto"
 
@@ -531,30 +549,12 @@ class TestBadOverridesNeverBreakBoot:
         (tmp_path / "config_overrides.toml").write_text(overrides_text)
         return load_config(config_path)
 
-    def test_shutdown_gpio_override_colliding_with_the_display_pins_is_dropped(self, tmp_path, caplog):
-        base = REQUIRED_SECTIONS + "\n[display]\nenabled = true\n"
+    def test_a_leftover_shutdown_gpio_override_is_ignored_next_to_a_valid_one(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING):
+            config = self._load(tmp_path, "system_shutdown_gpio = 2\nidle_threshold_s = 600\n")
 
-        with caplog.at_level(logging.ERROR):
-            config = self._load(tmp_path, "system_shutdown_gpio = 2\n", base)
-
-        assert config.system.shutdown_gpio == 17
-        assert "GPIO pin conflict" in caplog.text
-
-    def test_display_override_colliding_with_the_shutdown_pin_is_dropped(self, tmp_path):
-        base = REQUIRED_SECTIONS + "\n[system]\nshutdown_gpio = 3\n"
-
-        config = self._load(tmp_path, "display_enabled = true\n", base)
-
-        assert config.display.enabled is False
-        assert config.system.shutdown_gpio == 3
-
-    def test_a_valid_override_survives_next_to_a_dropped_one(self, tmp_path):
-        base = REQUIRED_SECTIONS + "\n[display]\nenabled = true\n"
-
-        config = self._load(tmp_path, "system_shutdown_gpio = 2\nidle_threshold_s = 600\n", base)
-
-        assert config.system.shutdown_gpio == 17
         assert config.collector.max_idle_time == 600
+        assert "system_shutdown_gpio" in caplog.text
 
     def test_a_half_set_home_position_override_is_dropped(self, tmp_path):
         config = self._load(tmp_path, "movement_gate_home_latitude = 48.1\n")
@@ -577,15 +577,15 @@ class TestBadOverridesNeverBreakBoot:
         assert (config.movement_gate.home_latitude, config.movement_gate.home_longitude) == (48.1, 11.5)
 
     def test_a_violation_in_config_toml_itself_still_raises(self, tmp_path):
-        base = REQUIRED_SECTIONS + "\n[system]\nshutdown_gpio = 2\n\n[display]\nenabled = true\n"
+        base = REQUIRED_SECTIONS + "\n[movement_gate]\nhome_latitude = 48.1\n"
 
-        with pytest.raises(ValueError, match="GPIO pin conflict"):
+        with pytest.raises(ValueError, match="home"):
             self._load(tmp_path, "idle_threshold_s = 600\n", base)
 
     def test_a_corrupt_overrides_file_does_not_break_boot(self, tmp_path):
         config = self._load(tmp_path, "this is = = not toml\n")
 
-        assert config.collector.max_idle_time == 200
+        assert config.collector.max_idle_time == 1800
 
     def test_a_stale_removed_field_in_the_overrides_file_does_not_break_boot(self, tmp_path):
         config = self._load(tmp_path, "rsrp_threshold = -90.0\nidle_threshold_s = 600\n")
@@ -605,7 +605,7 @@ def test_load_config_warns_on_unset_identity_fields_when_running_on_pi(tmp_path,
 
 def test_load_config_does_not_warn_on_hmac_secret_when_heartbeat_disabled(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
-        load_config(write_config(tmp_path, REQUIRED_SECTIONS))
+        load_config(write_config(tmp_path, REQUIRED_SECTIONS + "\n[heartbeat]\nenabled = false\n"))
 
     assert "hmac_secret" not in caplog.text
 
@@ -641,6 +641,7 @@ device_key = "real-key"
 
 [heartbeat]
 device_id = "pi-01"
+hmac_secret = "real-secret"
 
 [quectel_cm]
 binary = "/usr/local/bin/quectel-CM"
@@ -651,156 +652,255 @@ binary = "/usr/local/bin/quectel-CM"
 
     assert caplog.text == ""
 
-class TestMissionProfiles:
+class TestLeftoverProfileTables:
     DRONE_PROFILE = """
 [profiles.drone]
 movement_gate_enabled = false
 idle_threshold_s = 0
 """
 
-    def drone_config(self, tmp_path, extra=""):
-        content = REQUIRED_SECTIONS + '\n[device]\nmission_type = "drone"\n' + self.DRONE_PROFILE + extra
+    def drone_config(self, tmp_path):
+        content = REQUIRED_SECTIONS + '\n[device]\nmission_type = "drone"\n' + self.DRONE_PROFILE
         return write_config(tmp_path, content)
 
-    def test_profile_of_the_configured_mission_type_is_applied(self, tmp_path):
+    def test_leftover_profile_table_does_not_fail_boot(self, tmp_path):
         config = load_config(self.drone_config(tmp_path))
 
-        assert config.movement_gate.enabled is False
-        assert config.collector.max_idle_time == 0
+        assert config.device.mission_type == "drone"
 
-    def test_profile_of_another_mission_type_is_not_applied(self, tmp_path):
-        content = REQUIRED_SECTIONS + self.DRONE_PROFILE
-        config = load_config(write_config(tmp_path, content))
+    def test_leftover_profile_values_are_not_applied(self, tmp_path):
+        config = load_config(self.drone_config(tmp_path))
 
         assert config.movement_gate.enabled is True
-        assert config.collector.max_idle_time == 200
+        assert config.collector.max_idle_time == 1800
 
-    def test_empty_ground_profile_changes_nothing(self, tmp_path):
-        config = load_config(write_config(tmp_path, REQUIRED_SECTIONS + "\n[profiles.ground]\n"))
+    def test_invalid_leftover_profile_content_does_not_fail_boot(self, tmp_path):
+        content = REQUIRED_SECTIONS + '\n[profiles.boat]\nbogus = "x"\n'
 
-        assert config.movement_gate.enabled is True
+        load_config(write_config(tmp_path, content))
 
-    def test_no_profiles_section_is_fine(self, tmp_path):
-        config = load_config(write_config(tmp_path, REQUIRED_SECTIONS + '\n[device]\nmission_type = "drone"\n'))
+    def test_leftover_profiles_that_are_not_tables_do_not_fail_boot(self, tmp_path):
+        content = 'profiles = "x"\n' + REQUIRED_SECTIONS
 
-        assert config.movement_gate.enabled is True
+        load_config(write_config(tmp_path, content))
 
-    def test_profile_wins_over_config_toml(self, tmp_path):
-        extra = "\n[movement_gate]\nenabled = true\n[collector]\nmax_idle_time = 500\n"
-        config = load_config(self.drone_config(tmp_path, extra))
+    def test_warns_once_naming_the_tables_but_not_their_values(self, tmp_path, caplog):
+        content = (
+            REQUIRED_SECTIONS
+            + self.DRONE_PROFILE
+            + "\n[profiles.ground]\nidle_threshold_s = 4242\n"
+        )
 
-        assert config.movement_gate.enabled is False
-        assert config.collector.max_idle_time == 0
+        with caplog.at_level(logging.WARNING):
+            load_config(write_config(tmp_path, content))
 
-    def test_config_local_toml_wins_over_profile(self, tmp_path):
-        config_path = self.drone_config(tmp_path)
-        (tmp_path / "config.local.toml").write_text('[device]\ndevice_id = "uav-1"\n')
+        warnings = [r.getMessage() for r in caplog.records if "profiles" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "[profiles.drone]" in warnings[0]
+        assert "[profiles.ground]" in warnings[0]
+        assert "movement_gate_enabled" not in warnings[0]
+        assert "4242" not in warnings[0]
 
-        config = load_config(config_path)
+    def test_no_warning_without_profile_tables(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING):
+            load_config(write_config(tmp_path, REQUIRED_SECTIONS))
 
-        assert config.device.device_id == "uav-1"
-        assert config.movement_gate.enabled is False
+        assert not any("profiles" in r.getMessage() for r in caplog.records)
 
-    def test_overrides_win_over_profile(self, tmp_path):
-        config_path = self.drone_config(tmp_path)
-        (tmp_path / "config_overrides.toml").write_text("movement_gate_enabled = true\nidle_threshold_s = 90\n")
+    def test_mission_type_override_still_applies_as_a_label(self, tmp_path):
+        from measurement_software.core.config_sources import OVERRIDES_FILENAME
 
-        config = load_config(config_path)
+        (tmp_path / OVERRIDES_FILENAME).write_text('device_mission_type = "drone"\n')
 
-        assert config.movement_gate.enabled is True
-        assert config.collector.max_idle_time == 90
-
-    def test_mission_type_set_by_override_selects_that_profile(self, tmp_path):
-        content = REQUIRED_SECTIONS + self.DRONE_PROFILE
-        config_path = write_config(tmp_path, content)
-        (tmp_path / "config_overrides.toml").write_text('device_mission_type = "drone"\n')
-
-        config = load_config(config_path)
+        config = load_config(write_config(tmp_path, REQUIRED_SECTIONS))
 
         assert config.device.mission_type == "drone"
-        assert config.movement_gate.enabled is False
-
-    def test_mission_type_override_back_to_ground_drops_the_drone_profile(self, tmp_path):
-        config_path = self.drone_config(tmp_path)
-        (tmp_path / "config_overrides.toml").write_text('device_mission_type = "ground"\n')
-
-        config = load_config(config_path)
-
         assert config.movement_gate.enabled is True
-        assert config.collector.max_idle_time == 200
-
-    def test_unknown_profile_field_raises(self, tmp_path):
-        content = REQUIRED_SECTIONS + "\n[profiles.drone]\nmovement_gate_enable = false\n"
-
-        with pytest.raises(ValueError, match="movement_gate_enable"):
-            load_config(write_config(tmp_path, content))
-
-    def test_invalid_profile_value_raises(self, tmp_path):
-        content = REQUIRED_SECTIONS + '\n[profiles.drone]\nmovement_gate_enabled = "no"\n'
-
-        with pytest.raises(ValueError, match="movement_gate_enabled"):
-            load_config(write_config(tmp_path, content))
-
-    def test_out_of_range_profile_value_raises(self, tmp_path):
-        content = REQUIRED_SECTIONS + "\n[profiles.drone]\nidle_threshold_s = -1\n"
-
-        with pytest.raises(ValueError, match="idle_threshold_s"):
-            load_config(write_config(tmp_path, content))
-
-    def test_invalid_profile_raises_even_when_it_is_not_the_active_one(self, tmp_path):
-        content = REQUIRED_SECTIONS + "\n[profiles.drone]\nbogus = 1\n"
-
-        with pytest.raises(ValueError, match="bogus"):
-            load_config(write_config(tmp_path, content))
-
-    @pytest.mark.parametrize("field, value", [
-        ("backend_url", '"https://x"'),
-        ("backend_device_key", '"k"'),
-        ("heartbeat_hmac_secret", '"s"'),
-        ("heartbeat_device_id", '"d"'),
-        ("device_device_id", '"d"'),
-        ("quectel_cm_binary", '"/bin/x"'),
-    ])
-    def test_profile_cannot_set_config_local_only_fields(self, tmp_path, field, value):
-        content = REQUIRED_SECTIONS + f"\n[profiles.drone]\n{field} = {value}\n"
-
-        with pytest.raises(ValueError, match=field):
-            load_config(write_config(tmp_path, content))
-
-    def test_profile_cannot_set_mission_type(self, tmp_path):
-        content = REQUIRED_SECTIONS + '\n[profiles.drone]\ndevice_mission_type = "ground"\n'
-
-        with pytest.raises(ValueError, match="device_mission_type"):
-            load_config(write_config(tmp_path, content))
-
-    def test_unknown_profile_name_raises(self, tmp_path):
-        content = REQUIRED_SECTIONS + "\n[profiles.boat]\nmovement_gate_enabled = false\n"
-
-        with pytest.raises(ValueError, match="boat"):
-            load_config(write_config(tmp_path, content))
-
-    def test_profile_that_breaks_a_config_check_raises(self, tmp_path):
-        content = REQUIRED_SECTIONS + "\n[profiles.ground]\nsystem_mode = \"waiting\"\nmovement_gate_home_latitude = 1.0\n"
-
-        with pytest.raises(ValueError, match="home_latitude"):
-            load_config(write_config(tmp_path, content))
-
-    def test_logs_only_the_profile_name(self, tmp_path, caplog):
-        with caplog.at_level(logging.INFO):
-            load_config(self.drone_config(tmp_path))
-
-        messages = [r.getMessage() for r in caplog.records if "profile" in r.getMessage()]
-        assert any("drone" in m for m in messages)
-        assert not any("movement_gate_enabled" in m or "False" in m for m in messages)
+        assert config.collector.max_idle_time == 1800
 
 
-def test_shipped_config_toml_defines_an_empty_ground_and_the_drone_profile():
+def test_shipped_config_toml_has_no_profile_tables():
     import tomllib
-    from measurement_software.core.config_sources import parse_profiles
 
     with open(Path(__file__).parents[2] / "config.toml", "rb") as f:
-        profiles = parse_profiles(tomllib.load(f)["profiles"])
+        assert "profiles" not in tomllib.load(f)
 
-    assert profiles["ground"].movement_gate_enabled is None
-    assert profiles["drone"].movement_gate_enabled is False
-    assert profiles["drone"].idle_threshold_s == 0
+
+def test_shipped_config_toml_keeps_the_collector_max_idle_time_default():
+    import tomllib
+
+    with open(Path(__file__).parents[2] / "config.toml", "rb") as f:
+        shipped = tomllib.load(f)["collector"]
+
+    assert shipped["max_idle_time"] == CollectorConfig().max_idle_time == 1800
+
+
+def test_load_config_ignores_the_removed_scp_uploader_fields_with_one_warning_naming_only_the_fields(tmp_path, caplog):
+    content = REQUIRED_SECTIONS + """upload_user = "secret-user"
+upload_host = "secret-host.example.org"
+upload_port = 2222
+remote_dir = "/secret/dir/"
+"""
+    with caplog.at_level(logging.WARNING):
+        config = load_config(write_config(tmp_path, content))
+
+    assert config.uploader.upload_dir == "/data/uploads"
+    warnings = [r.getMessage() for r in caplog.records if "upload_user" in r.getMessage()]
+    assert len(warnings) == 1
+    for name in ("upload_user", "upload_host", "upload_port", "remote_dir"):
+        assert name in warnings[0]
+    for value in ("secret-user", "secret-host.example.org", "2222", "/secret/dir/"):
+        assert value not in warnings[0]
+
+
+def test_load_config_does_not_warn_about_scp_fields_when_none_are_present(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        load_config(write_config(tmp_path, REQUIRED_SECTIONS))
+
+    assert not [r for r in caplog.records if "upload_user" in r.getMessage()]
+
+
+class TestLoadLinkSettings:
+    """What the emergency link needs when load_config() itself fails: read leniently, never raise."""
+
+    def test_reads_the_link_sections_even_when_the_rest_of_the_config_is_broken(self, tmp_path):
+        config_path = write_config(tmp_path, """
+[modem]
+type = 42
+[system]
+running_on_pi = false
+[quectel_cm]
+binary = "/opt/quectel-CM"
+args = ["-s", "apn.example"]
+[link_watchdog]
+interface = "wwan1"
+restart_after_s = 60
+max_restart_interval_s = 600.0
+""")
+        settings = load_link_settings(config_path)
+
+        assert settings.running_on_pi is False
+        assert settings.quectel_cm == QuectelCmConfig(binary="/opt/quectel-CM", args=("-s", "apn.example"))
+        assert settings.link_watchdog == LinkWatchdogConfig(
+            interface="wwan1", restart_after_s=60.0, max_restart_interval_s=600.0,
+        )
+
+    def test_the_local_file_sets_the_binary(self, tmp_path):
+        config_path = write_config(tmp_path, '[quectel_cm]\nbinary = "/add/your/quectel-CM/path/here"\n')
+        (tmp_path / "config.local.toml").write_text('[quectel_cm]\nbinary = "/home/pi/quectel-CM"\n')
+
+        assert load_link_settings(config_path).quectel_cm.binary == "/home/pi/quectel-CM"
+
+    def test_a_placeholder_binary_falls_back_to_the_vendored_one(self, tmp_path):
+        config_path = write_config(tmp_path, '[quectel_cm]\nbinary = "/add/your/quectel-CM/path/here"\n')
+
+        binary = load_link_settings(config_path).quectel_cm.binary
+
+        assert binary == str(tmp_path / "vendor" / "quectel-CM" / "quectel-CM")
+
+    def test_unreadable_files_leave_the_built_in_defaults(self, tmp_path):
+        config_path = write_config(tmp_path, "this is [not toml")
+        (tmp_path / "config.local.toml").write_text("neither = [is this")
+
+        settings = load_link_settings(config_path)
+
+        assert settings.running_on_pi is True
+        assert settings.quectel_cm.args == ()
+        assert settings.quectel_cm.binary == str(tmp_path / "vendor" / "quectel-CM" / "quectel-CM")
+        assert settings.link_watchdog == LinkWatchdogConfig()
+
+    def write_last_good(self, tmp_path, payload) -> None:
+        (tmp_path / LAST_GOOD_LINK_SETTINGS_FILENAME).write_text(json.dumps(payload))
+
+    LAST_GOOD = {
+        "system": {"running_on_pi": True},
+        "quectel_cm": {"binary": "/opt/quectel-CM", "args": ["-s", "apn.example"]},
+        "link_watchdog": {"interface": "wwan1", "restart_after_s": 60.0},
+    }
+
+    def test_an_unreadable_config_falls_back_to_the_last_good_link_settings(self, tmp_path):
+        """One syntax error anywhere makes config.toml unreadable as a whole - with it the APN, and
+        quectel-CM can't bring up the link without one."""
+        config_path = write_config(tmp_path, "this is [not toml")
+        self.write_last_good(tmp_path, self.LAST_GOOD)
+
+        settings = load_link_settings(config_path)
+
+        assert settings.quectel_cm == QuectelCmConfig(binary="/opt/quectel-CM", args=("-s", "apn.example"))
+        assert settings.link_watchdog == LinkWatchdogConfig(interface="wwan1", restart_after_s=60.0)
+
+    def test_a_missing_config_falls_back_to_the_last_good_link_settings(self, tmp_path):
+        self.write_last_good(tmp_path, self.LAST_GOOD)
+
+        assert load_link_settings(tmp_path / "config.toml").quectel_cm.args == ("-s", "apn.example")
+
+    def test_a_readable_config_wins_over_the_last_good_link_settings(self, tmp_path):
+        config_path = write_config(tmp_path, '[quectel_cm]\nargs = ["-s", "new.apn"]\n')
+        self.write_last_good(tmp_path, self.LAST_GOOD)
+
+        settings = load_link_settings(config_path)
+
+        assert settings.quectel_cm.args == ("-s", "new.apn")
+        assert settings.quectel_cm.binary == "/opt/quectel-CM"
+
+    def test_the_local_file_wins_over_the_last_good_link_settings(self, tmp_path):
+        self.write_last_good(tmp_path, self.LAST_GOOD)
+        (tmp_path / "config.local.toml").write_text('[quectel_cm]\nbinary = "/home/pi/quectel-CM"\n')
+
+        assert load_link_settings(tmp_path / "config.toml").quectel_cm.binary == "/home/pi/quectel-CM"
+
+    def test_an_unreadable_last_good_file_is_ignored(self, tmp_path, caplog):
+        caplog.set_level(logging.WARNING)
+        (tmp_path / LAST_GOOD_LINK_SETTINGS_FILENAME).write_text("{not json")
+
+        settings = load_link_settings(tmp_path / "config.toml")
+
+        assert settings.quectel_cm.args == ()
+        assert LAST_GOOD_LINK_SETTINGS_FILENAME in caplog.text
+
+    def test_a_missing_config_file_leaves_the_built_in_defaults(self, tmp_path):
+        settings = load_link_settings(tmp_path / "config.toml")
+
+        assert settings.link_watchdog == LinkWatchdogConfig()
+
+    def test_a_field_of_the_wrong_type_is_ignored_without_logging_its_value(self, tmp_path, caplog):
+        config_path = write_config(tmp_path, """
+[quectel_cm]
+args = "-s secret-apn"
+[link_watchdog]
+restart_after_s = "soon"
+check_interval_s = 10.0
+""")
+        caplog.set_level(logging.WARNING)
+
+        settings = load_link_settings(config_path)
+
+        assert settings.quectel_cm.args == ()
+        assert settings.link_watchdog.restart_after_s == 180.0
+        assert settings.link_watchdog.check_interval_s == 10.0
+        assert "link_watchdog.restart_after_s" in caplog.text
+        assert "soon" not in caplog.text and "secret-apn" not in caplog.text
+
+    def test_link_watchdog_values_that_fail_validation_fall_back_to_the_defaults(self, tmp_path):
+        config_path = write_config(tmp_path, "[link_watchdog]\nrestart_after_s = 600.0\nmax_restart_interval_s = 60.0\n")
+
+        assert load_link_settings(config_path).link_watchdog == LinkWatchdogConfig()
+
+    def test_the_local_file_cannot_set_fields_outside_its_allow_list(self, tmp_path):
+        config_path = write_config(tmp_path, "")
+        (tmp_path / "config.local.toml").write_text(
+            '[quectel_cm]\nargs = ["-x"]\n[link_watchdog]\ninterface = "eth0"\n[system]\nrunning_on_pi = false\n'
+        )
+
+        settings = load_link_settings(config_path)
+
+        assert settings.quectel_cm.args == ()
+        assert settings.link_watchdog.interface == "wwan0"
+        assert settings.running_on_pi is True
+
+    def test_reads_nothing_else_from_the_system_section(self, tmp_path, caplog):
+        config_path = write_config(tmp_path, '[system]\nmode = 7\nrunning_on_pi = false\n')
+        caplog.set_level(logging.WARNING)
+
+        assert load_link_settings(config_path).running_on_pi is False
+        assert "system.mode" not in caplog.text

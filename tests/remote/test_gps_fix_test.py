@@ -490,7 +490,7 @@ class TestSharedGpsFixStatus:
     ):
         """The screen and heartbeat both read `gps_fix_status`, not this diagnostic's own reports
         - MovementGate/Collector are the only other things that feed it, and neither runs while
-        this diagnostic is meaningful (Waiting Mode idle). Without this,
+        this diagnostic is meaningful (Manual Mode idle). Without this,
         the screen/heartbeat would show "no fix" the entire time this diagnostic sees one."""
         runner = GpsFixTestRunner(
             GNSS_CONFIG, GpsFixTestConfig(status_url="", report_interval_s=0.01, timeout_s=10.0),

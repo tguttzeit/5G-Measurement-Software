@@ -1,11 +1,18 @@
 import pytest
 
-from measurement_software.core.run_phase import RunPhase, RunPhaseState, WaitingLoop, short_phase_label
+from measurement_software.core.run_phase import RunPhase, RunPhaseState, ManualModeLoop, short_phase_label
 
 
 class TestRunPhase:
-    def test_defaults_to_starting_up(self):
-        assert RunPhase().get() == "starting up"
+    def test_defaults_to_the_starting_up_state(self):
+        assert RunPhase().get() == RunPhaseState.STARTING_UP == "starting_up"
+
+    def test_accepts_the_stopping_state(self):
+        phase = RunPhase()
+
+        phase.set(RunPhaseState.STOPPING)
+
+        assert phase.get() == "stopping"
 
     def test_get_reflects_the_latest_set_label(self):
         phase = RunPhase()
@@ -38,12 +45,12 @@ class TestRunPhase:
 
         assert phase.get() == "waiting_for_movement"
 
-    def test_accepts_the_waiting_mode_idle_state(self):
+    def test_accepts_the_manual_mode_idle_state(self):
         phase = RunPhase()
 
-        phase.set(RunPhaseState.WAITING_MODE_IDLE)
+        phase.set(RunPhaseState.MANUAL_MODE_IDLE)
 
-        assert phase.get() == "waiting_mode_idle"
+        assert phase.get() == "manual_mode_idle"
 
     def test_accepts_the_active_measuring_state(self):
         phase = RunPhase()
@@ -81,13 +88,23 @@ class TestRunPhase:
         assert phase.get() == "rebooting"
 
 
+class TestRecoveryIdleState:
+    def test_is_reported_as_recovery_idle(self):
+        phase = RunPhase()
+
+        phase.set(RunPhaseState.RECOVERY_IDLE)
+
+        assert phase.get() == "recovery_idle"
+
+
 class TestShortPhaseLabel:
     def test_maps_every_run_phase_state_to_a_short_fixed_label(self):
         expected = {
             RunPhaseState.RECOVERING_PENDING_DATA: "Recovering data",
             RunPhaseState.WAITING_FOR_GPS_FIX: "No GPS fix",
             RunPhaseState.WAITING_FOR_MOVEMENT: "Waiting: move",
-            RunPhaseState.WAITING_MODE_IDLE: "Idle (waiting)",
+            RunPhaseState.MANUAL_MODE_IDLE: "Idle (manual)",
+            RunPhaseState.RECOVERY_IDLE: "Idle (recovery)",
             RunPhaseState.ACTIVE_MEASURING: "Measuring",
             RunPhaseState.FINALIZING: "Finalizing",
             RunPhaseState.DONE: "Done",
@@ -102,9 +119,9 @@ class TestShortPhaseLabel:
         assert short_phase_label("starting up") == "starting up"
 
 
-class TestWaitingLoop:
+class TestManualModeLoop:
     def test_wait_returns_immediately_if_already_requested(self, monkeypatch):
-        loop = WaitingLoop()
+        loop = ManualModeLoop()
         loop.request_start_measuring()
 
         sleep_calls = []
@@ -117,7 +134,7 @@ class TestWaitingLoop:
         assert sleep_calls == []
 
     def test_wait_blocks_until_start_measuring_is_requested(self, monkeypatch):
-        loop = WaitingLoop()
+        loop = ManualModeLoop()
         calls = []
 
         def fake_sleep(seconds):
@@ -131,8 +148,41 @@ class TestWaitingLoop:
 
         assert len(calls) == 3
 
+    def test_a_start_request_is_consumed_by_the_wait_it_ends(self, monkeypatch):
+        loop = ManualModeLoop()
+        loop.request_start_measuring()
+        sleeps = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 2:
+                loop.request_start_measuring()
+
+        monkeypatch.setattr("measurement_software.core.run_phase.time.sleep", fake_sleep)
+        loop.wait()
+
+        loop.wait()
+
+        assert len(sleeps) == 2
+
+    def test_cancel_start_request_makes_the_next_wait_block_again(self, monkeypatch):
+        loop = ManualModeLoop()
+        loop.request_start_measuring()
+        loop.cancel_start_request()
+        sleeps = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 2:
+                loop.request_start_measuring()
+
+        monkeypatch.setattr("measurement_software.core.run_phase.time.sleep", fake_sleep)
+        loop.wait()
+
+        assert len(sleeps) == 2
+
     def test_request_start_measuring_is_idempotent(self, monkeypatch):
-        loop = WaitingLoop()
+        loop = ManualModeLoop()
         loop.request_start_measuring()
         loop.request_start_measuring()
 
@@ -140,7 +190,7 @@ class TestWaitingLoop:
         loop.wait()  # must not hang or raise
 
     def test_wait_runs_the_selftest_callback_when_requested_then_keeps_waiting(self, monkeypatch):
-        loop = WaitingLoop()
+        loop = ManualModeLoop()
         loop.request_run_selftest()
         selftest_calls = []
 
@@ -154,7 +204,7 @@ class TestWaitingLoop:
         assert selftest_calls == [True]
 
     def test_run_selftest_request_does_not_end_the_wait_by_itself(self, monkeypatch):
-        loop = WaitingLoop()
+        loop = ManualModeLoop()
         loop.request_run_selftest()
         calls = []
 
@@ -170,7 +220,7 @@ class TestWaitingLoop:
         assert len(calls) == 2
 
     def test_wait_without_a_selftest_callback_ignores_a_pending_selftest_request(self, monkeypatch):
-        loop = WaitingLoop()
+        loop = ManualModeLoop()
         loop.request_run_selftest()
 
         def fake_sleep(seconds):
@@ -181,7 +231,7 @@ class TestWaitingLoop:
         loop.wait()  # must not hang or raise with no on_run_selftest given
 
     def test_request_run_selftest_is_idempotent(self, monkeypatch):
-        loop = WaitingLoop()
+        loop = ManualModeLoop()
         loop.request_run_selftest()
         loop.request_run_selftest()
         selftest_calls = []
@@ -196,7 +246,7 @@ class TestWaitingLoop:
         assert selftest_calls == [True]
 
     def test_calls_on_check_remote_shutdown_once_per_iteration(self, monkeypatch):
-        loop = WaitingLoop()
+        loop = ManualModeLoop()
         calls = []
 
         def fake_sleep(seconds):
@@ -215,7 +265,7 @@ class TestWaitingLoop:
     def test_propagates_an_exception_from_on_check_remote_shutdown_before_checking_anything_else(
         self, monkeypatch,
     ):
-        loop = WaitingLoop()
+        loop = ManualModeLoop()
         sleep_calls = []
         monkeypatch.setattr(
             "measurement_software.core.run_phase.time.sleep", lambda s: sleep_calls.append(s)
@@ -230,7 +280,7 @@ class TestWaitingLoop:
         assert sleep_calls == []
 
     def test_defaults_to_no_hook_without_breaking_the_wait(self, monkeypatch):
-        loop = WaitingLoop()
+        loop = ManualModeLoop()
 
         def fake_sleep(seconds):
             loop.request_start_measuring()

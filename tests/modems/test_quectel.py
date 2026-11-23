@@ -5,6 +5,7 @@ import serial
 
 from measurement_software.core.config import ModemConfig
 from measurement_software.modems.modem import (
+    CellSample,
     ModemConnectionError,
     SimPinNotConfiguredError,
     SimPinRejectedError,
@@ -187,26 +188,103 @@ class TestParseLte:
         assert sample.rsrp is None
 
 
-class TestParseNr5g:
-    PARTS = ["NR5G-SA", "460", "11", "8901", "-88", "18", "-9", "632448", "78", "1"]
+# Captured verbatim from a real RM520N-GL (firmware RM520NGLAAR01A07M4G_01.201.01.201) on an EN-DC
+# cell: the LTE anchor and the NR5G-NSA leg come on lines of their own after the state line.
+REAL_ENDC_RESPONSE = (
+    'AT+QENG="servingcell"\r\r\n'
+    '+QENG: "servingcell","NOCONN"\r\n'
+    '+QENG: "LTE","FDD",262,02,1431C13,196,100,1,5,5,BBB3,-86,-11,-52,15,10,170,-\r\n'
+    '+QENG: "NR5G-NSA",262,02,797,-103,21,-13,631968,78,10,1\r\n'
+    "\r\nOK\r\n"
+)
 
-    def test_maps_fields_by_index(self):
-        sample = Quectel._parse_nr5g(self.PARTS, "NR5G-SA")
+# Not captured on a device (no SA cell reachable): the example Quectel's own connection manager
+# documents for its SA parser (vendor/quectel-CM/atc.c).
+VENDOR_SA_LINE = '+QENG: "servingcell","NOCONN","NR5G-SA","TDD", 454,12,0,21,4ED,636576,78,3,-85,-11,32,0,5184\r\n'
 
-        assert sample.rat == "NR5G-SA"
-        assert sample.mcc == 460
-        assert sample.mnc == 11
-        assert sample.tac == 8901
-        assert sample.rsrp == -88.0
-        assert sample.sinr == 18.0
-        assert sample.rsrq == -9.0
-        assert sample.channel == 632448
-        assert sample.band == 78
-        assert sample.vendor_specific_extras == {"scs_index": 1}
 
-    def test_nsa_rat_label_is_preserved(self):
-        sample = Quectel._parse_nr5g(self.PARTS, "NR5G-NSA")
-        assert sample.rat == "NR5G-NSA"
+class TestParseNr5gNsa:
+    """`"NR5G-NSA",<MCC>,<MNC>,<PCID>,<RSRP>,<SINR>,<RSRQ>,<ARFCN>,<band>,<NR_DL_bandwidth>,<scs>`"""
+
+    def nsa_sample(self) -> CellSample:
+        [_, nsa] = Quectel(make_config())._parse_qeng_response(REAL_ENDC_RESPONSE)
+        return nsa
+
+    def test_maps_the_real_line(self):
+        assert self.nsa_sample() == CellSample(
+            rat="NR5G-NSA", mcc=262, mnc=2, pci=797, rsrp=-103.0, sinr=21.0, rsrq=-13.0,
+            channel=631968, band=78,
+            vendor_specific_extras={"dl_bandwidth_index": 10, "scs_index": 1},
+        )
+
+    def test_reports_no_tac_and_no_cell_id(self):
+        """Position 3 is the PCI - the NSA line carries neither TAC nor cell ID."""
+        sample = self.nsa_sample()
+
+        assert sample.tac is None
+        assert sample.cell_id is None
+
+
+class TestParseNr5gSa:
+    """`"servingcell",<state>,"NR5G-SA",<duplex_mode>,<MCC>,<MNC>,<cellID>,<PCID>,<TAC>,<ARFCN>,
+    <band>,<NR_DL_bandwidth>,<RSRP>,<RSRQ>,<SINR>,<...>,<srxlev>` - RSRQ before SINR, unlike NSA."""
+
+    def test_maps_the_documented_line(self):
+        [sample] = Quectel(make_config())._parse_qeng_response(VENDOR_SA_LINE)
+
+        assert sample == CellSample(
+            rat="NR5G-SA", mcc=454, mnc=12, cell_id=0, pci=21, tac=0x4ED, channel=636576, band=78,
+            rsrp=-85.0, rsrq=-11.0, sinr=32.0,
+            vendor_specific_extras={"duplex_mode": "TDD", "dl_bandwidth_index": 3, "srxlev": 5184},
+        )
+
+    def test_cell_id_is_hex(self):
+        line = '+QENG: "servingcell","NOCONN","NR5G-SA","TDD",262,02,1D2B4C01,123,A1B2C3,632736,78,12,-95,-11,15,1,-\r\n'
+
+        [sample] = Quectel(make_config())._parse_qeng_response(line)
+
+        assert sample.cell_id == 0x1D2B4C01
+        assert sample.tac == 0xA1B2C3
+        assert sample.vendor_specific_extras["srxlev"] is None
+
+
+class TestMalformedQengLines:
+    """Modem output comes from outside the process: an unexpected firmware format must never
+    crash a run."""
+
+    @pytest.mark.parametrize("line", [
+        '+QENG: "NR5G-NSA",262,02',
+        '+QENG: "servingcell","NOCONN","NR5G-SA","TDD",262',
+        '+QENG: "NR5G-NSA"',
+    ])
+    def test_a_short_nr5g_line_yields_none_for_what_is_missing(self, line):
+        [sample] = Quectel(make_config())._parse_qeng_response(line + "\r\n")
+
+        assert sample.rsrp is None
+        assert sample.band is None
+
+    def test_non_numeric_fields_yield_none(self):
+        [sample] = Quectel(make_config())._parse_qeng_response(
+            '+QENG: "NR5G-NSA",abc,02,x,-1o3,21,-13,631968,78,10,1\r\n'
+        )
+
+        assert (sample.mcc, sample.pci, sample.rsrp, sample.sinr) == (None, None, None, 21.0)
+
+    def test_a_short_lte_line_is_skipped_and_logged_without_losing_the_others(self, caplog):
+        caplog.set_level(logging.WARNING)
+        response = '+QENG: "LTE","FDD",262,02\r\n+QENG: "NR5G-NSA",262,02,797,-103,21,-13,631968,78,10,1\r\n'
+
+        results = Quectel(make_config())._parse_qeng_response(response)
+
+        assert [r.rat for r in results] == ["NR5G-NSA"]
+        assert "Could not parse QENG line" in caplog.text
+
+    def test_each_raw_line_is_logged_at_debug_level(self, caplog):
+        caplog.set_level(logging.DEBUG, logger="measurement_software.modems.quectel")
+
+        Quectel(make_config())._parse_qeng_response(REAL_ENDC_RESPONSE)
+
+        assert '+QENG: "NR5G-NSA",262,02,797,-103,21,-13,631968,78,10,1' in caplog.text
 
 
 class TestParseQengResponse:
@@ -241,6 +319,13 @@ class TestParseQengResponse:
         results = self._modem()._parse_qeng_response(response)
 
         assert [r.rat for r in results] == ["LTE", "NR5G-NSA"]
+
+    def test_parses_the_real_endc_response_with_one_line_per_rat(self):
+        results = self._modem()._parse_qeng_response(REAL_ENDC_RESPONSE)
+
+        assert [r.rat for r in results] == ["LTE", "NR5G-NSA"]
+        assert results[0].pci == 196
+        assert results[0].tac == 0xBBB3
 
     def test_bare_header_echo_with_no_data_is_skipped(self):
         response = '+QENG: "servingcell"\n'

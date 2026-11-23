@@ -1,6 +1,5 @@
 import logging
 import subprocess
-import sys
 import types
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from measurement_software.core import system
-from measurement_software.core.config_sources import read_and_clear_pending_reboot_ack
+from measurement_software.core.config_sources import read_and_clear_pending_command_ack
 from measurement_software.core.config import (
     AppConfig,
     BackendConfig,
@@ -30,47 +29,6 @@ from measurement_software.core.config import (
     UploaderConfig,
 )
 from measurement_software.modems.modem import CellSample, Modem
-
-
-@pytest.fixture
-def fake_gpio(monkeypatch):
-    """Injects a fake RPi.GPIO module so `import RPi.GPIO` resolves without real hardware."""
-    calls: list[tuple] = []
-    gpio = types.SimpleNamespace(BCM="BCM", OUT="OUT", LOW=0, HIGH=1)
-    gpio.setwarnings = lambda flag: calls.append(("setwarnings", flag))
-    gpio.setmode = lambda mode: calls.append(("setmode", mode))
-    gpio.setup = lambda pin, direction: calls.append(("setup", pin, direction))
-    gpio.output = lambda pin, value: calls.append(("output", pin, value))
-    gpio.cleanup = lambda: calls.append(("cleanup",))
-    gpio.calls = calls
-
-    rpi_module = types.ModuleType("RPi")
-    rpi_module.GPIO = gpio
-    monkeypatch.setitem(sys.modules, "RPi", rpi_module)
-    monkeypatch.setitem(sys.modules, "RPi.GPIO", gpio)
-    return gpio
-
-
-class TestGpioHelpers:
-    def test_setup_gpio_configures_pin_as_low_output(self, fake_gpio):
-        system.setup_gpio(17)
-
-        assert fake_gpio.calls == [
-            ("setwarnings", False),
-            ("setmode", "BCM"),
-            ("setup", 17, "OUT"),
-            ("output", 17, 0),
-        ]
-
-    def test_signal_completion_sets_pin_high(self, fake_gpio):
-        system.signal_completion(17)
-
-        assert fake_gpio.calls == [("output", 17, 1)]
-
-    def test_cleanup_gpio_calls_cleanup(self, fake_gpio):
-        system.cleanup_gpio()
-
-        assert fake_gpio.calls == [("cleanup",)]
 
 
 class FakeCheckOutput:
@@ -233,6 +191,60 @@ class TestStartQuectelCm:
         assert len(popen) == 1
 
 
+class FakeQuectelCmProcess:
+    """Stands in for the sudo/quectel-CM subprocess.Popen."""
+
+    def __init__(self, exited_with: int | None = None, ignores_terminate: bool = False):
+        self.returncode = exited_with
+        self.ignores_terminate = ignores_terminate
+        self.calls: list[str] = []
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.calls.append("terminate")
+        if not self.ignores_terminate:
+            self.returncode = -15
+
+    def kill(self):
+        self.calls.append("kill")
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        self.calls.append(f"wait({timeout})")
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("quectel-CM", timeout)
+        return self.returncode
+
+
+class TestStopQuectelCm:
+    def test_terminates_it_and_waits_for_it_to_take_the_link_down(self):
+        process = FakeQuectelCmProcess()
+
+        system.stop_quectel_cm(process)
+
+        assert process.calls == ["terminate", f"wait({system.QUECTEL_CM_STOP_TIMEOUT_S})"]
+
+    def test_kills_it_if_it_does_not_stop_in_time(self, caplog):
+        caplog.set_level(logging.WARNING)
+        process = FakeQuectelCmProcess(ignores_terminate=True)
+
+        system.stop_quectel_cm(process)
+
+        assert process.calls == ["terminate", f"wait({system.QUECTEL_CM_STOP_TIMEOUT_S})", "kill", "wait(None)"]
+        assert "killing it" in caplog.text
+
+    def test_leaves_one_that_already_exited_alone(self, caplog):
+        caplog.set_level(logging.WARNING)
+        process = FakeQuectelCmProcess(exited_with=1)
+
+        system.stop_quectel_cm(process)
+
+        assert process.calls == []
+        assert "had already exited (exit code 1)" in caplog.text
+
+
 class TestSetSystemClock:
     def test_sets_clock_via_sudo_date_with_an_argument_list(self, run):
         system.set_system_clock(datetime(2026, 7, 4, 20, 15, 30, tzinfo=UTC))
@@ -347,13 +359,13 @@ def make_app_config(upload_dir: Path, **overrides) -> AppConfig:
         movement_gate=MovementGateConfig(),
         quectel_cm=QuectelCmConfig(),
         run_status=RunStatusConfig(),
-        heartbeat=HeartbeatConfig(),
+        heartbeat=HeartbeatConfig(enabled=False),
         selftest=SelftestConfig(),
         gps_fix_test=GpsFixTestConfig(),
         storage=StorageConfig(),
-        display=DisplayConfig(),
-        latency_test=LatencyTestConfig(),
-        uploader=UploaderConfig(upload_dir=str(upload_dir), upload_user="user", upload_host="host"),
+        display=DisplayConfig(enabled=False),
+        latency_test=LatencyTestConfig(enabled=False),
+        uploader=UploaderConfig(upload_dir=str(upload_dir)),
         logging=LoggingConfig(),
         system=SystemConfig(),
         backend=BackendConfig(),
@@ -387,16 +399,8 @@ def shutdown_steps(monkeypatch) -> list:
         lambda config, backend_config, device_id: FakeUploader(config, backend_config, calls),
     )
     monkeypatch.setattr(
-        "measurement_software.core.system.signal_completion",
-        lambda pin: calls.append(("signal_completion", pin)),
-    )
-    monkeypatch.setattr(
         "measurement_software.core.system.perform_shutdown",
         lambda modem_cfg: calls.append(("perform_shutdown", modem_cfg)),
-    )
-    monkeypatch.setattr(
-        "measurement_software.core.system.cleanup_gpio",
-        lambda: calls.append("cleanup_gpio"),
     )
     return calls
 
@@ -421,14 +425,12 @@ def reboot_steps(monkeypatch) -> list:
         "measurement_software.core.system.perform_reboot",
         lambda modem_cfg: calls.append(("perform_reboot", modem_cfg)),
     )
-    # signal_completion/cleanup_gpio must never be touched by reboot() - assert that by not
-    # patching them at all; a real call would raise (no RPi.GPIO / no fake module injected).
     return calls
 
 
 class TestReboot:
-    def test_running_on_pi_runs_the_full_sequence_without_touching_gpio(self, reboot_steps, tmp_path):
-        config = make_app_config(tmp_path, system=SystemConfig(running_on_pi=True, shutdown_gpio=17))
+    def test_running_on_pi_runs_the_full_sequence(self, reboot_steps, tmp_path):
+        config = make_app_config(tmp_path, system=SystemConfig(running_on_pi=True))
 
         system.reboot(config, "remote_reboot_command")
 
@@ -462,7 +464,7 @@ class TestReboot:
 
 class TestShutdown:
     def test_running_on_pi_runs_the_full_sequence_in_order(self, shutdown_steps, tmp_path):
-        config = make_app_config(tmp_path, system=SystemConfig(running_on_pi=True, shutdown_gpio=17))
+        config = make_app_config(tmp_path, system=SystemConfig(running_on_pi=True))
 
         system.shutdown(config, "unhandled_exception")
 
@@ -470,12 +472,10 @@ class TestShutdown:
             ("discard_stale_temp_files", tmp_path),
             ("recover_unfinalized", tmp_path),
             "upload_pending_files",
-            ("signal_completion", 17),
             ("perform_shutdown", config.modem),
-            "cleanup_gpio",
         ]
 
-    def test_not_running_on_pi_skips_gpio_but_still_finalizes_and_powers_down(self, shutdown_steps, tmp_path):
+    def test_not_running_on_pi_still_finalizes_and_powers_down(self, shutdown_steps, tmp_path):
         config = make_app_config(tmp_path, system=SystemConfig(running_on_pi=False))
 
         system.shutdown(config, "unhandled_exception")
@@ -499,12 +499,8 @@ class TestShutdown:
         """Exercises recover_unfinalized() for real (unpatched) to confirm a run log left open
         by whatever triggered the shutdown actually gets finalized as part of the sequence."""
         monkeypatch.setattr(
-            "measurement_software.core.system.signal_completion", lambda pin: None
-        )
-        monkeypatch.setattr(
             "measurement_software.core.system.perform_shutdown", lambda modem_cfg: None
         )
-        monkeypatch.setattr("measurement_software.core.system.cleanup_gpio", lambda: None)
         monkeypatch.setattr(
             "measurement_software.core.uploader.subprocess.check_output",
             lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()),
@@ -578,9 +574,11 @@ class FakeHeartbeatUrlopen:
     def __init__(self, raise_error: Exception | None = None):
         self.raise_error = raise_error
         self.requests: list = []
+        self.timeouts: list = []
 
     def __call__(self, request, timeout=None):
         self.requests.append(request)
+        self.timeouts.append(timeout)
         if self.raise_error is not None:
             raise self.raise_error
         return types.SimpleNamespace(
@@ -688,6 +686,45 @@ class TestTerminalHeartbeat:
         assert heartbeat_urlopen.requests == []
 
 
+class TestStoppingHeartbeat:
+    def test_reports_the_stopping_phase_without_acking_a_command(self, heartbeat_urlopen, tmp_path):
+        config = app_config_with_heartbeat(tmp_path)
+
+        system.send_stopping_heartbeat(config)
+
+        [payload] = heartbeat_urlopen.payloads()
+        assert payload["run_phase"] == "stopping"
+        assert "executed_commands" not in payload
+
+    def test_caps_a_long_timeout_so_an_unreachable_backend_cannot_delay_the_finalize(
+            self, heartbeat_urlopen, tmp_path):
+        config = app_config_with_heartbeat(tmp_path)
+        config.heartbeat.timeout_s = 60.0
+
+        system.send_stopping_heartbeat(config)
+
+        assert heartbeat_urlopen.timeouts == [3.0]
+        assert config.heartbeat.timeout_s == 60.0
+
+    def test_keeps_a_timeout_that_is_already_short(self, heartbeat_urlopen, tmp_path):
+        config = app_config_with_heartbeat(tmp_path)
+        config.heartbeat.timeout_s = 1.0
+
+        system.send_stopping_heartbeat(config)
+
+        assert heartbeat_urlopen.timeouts == [1.0]
+
+    def test_never_raises_when_the_backend_is_unreachable(self, heartbeat_urlopen, tmp_path):
+        heartbeat_urlopen.raise_error = OSError("unreachable")
+
+        system.send_stopping_heartbeat(app_config_with_heartbeat(tmp_path))
+
+    def test_sends_nothing_when_the_heartbeat_is_disabled(self, heartbeat_urlopen, tmp_path):
+        system.send_stopping_heartbeat(make_app_config(tmp_path))
+
+        assert heartbeat_urlopen.requests == []
+
+
 class TestRebootPendingAck:
     def test_persists_the_command_id_when_both_are_given(
             self, heartbeat_urlopen, no_sleep, run, no_op_finalize, tmp_path):
@@ -696,7 +733,7 @@ class TestRebootPendingAck:
 
         system.reboot(config, "remote_reboot_command", command_id=52, config_path=config_path)
 
-        assert read_and_clear_pending_reboot_ack(tmp_path / "pending_reboot_ack.toml") == 52
+        assert read_and_clear_pending_command_ack(tmp_path / "pending_reboot_ack.toml") == 52
 
     def test_writes_nothing_without_a_command_id(
             self, heartbeat_urlopen, no_sleep, run, no_op_finalize, tmp_path):
@@ -768,3 +805,32 @@ class TestClockSyncTrySync:
 
         assert set_clock_calls == [valid]
         assert clock_sync.synced is True
+
+class TestShutdownPendingAck:
+    """shutdown-now's only ack on the way out is a single "received" heartbeat. If that is lost,
+    the backend redelivers the command after the next power-on - the persisted id lets that boot
+    ack it as done instead of shutting down again."""
+
+    def test_persists_the_command_id_when_both_are_given(
+            self, heartbeat_urlopen, no_sleep, run, no_op_finalize, tmp_path):
+        config = app_config_with_heartbeat(tmp_path, system=SystemConfig(running_on_pi=False))
+
+        system.shutdown(config, "remote_shutdown_command", command_id=61, config_path=tmp_path / "config.toml")
+
+        assert read_and_clear_pending_command_ack(tmp_path / "pending_shutdown_ack.toml") == 61
+
+    def test_writes_nothing_for_a_shutdown_no_command_triggered(
+            self, heartbeat_urlopen, no_sleep, run, no_op_finalize, tmp_path):
+        config = app_config_with_heartbeat(tmp_path, system=SystemConfig(running_on_pi=False))
+
+        system.shutdown(config, "run_completed", config_path=tmp_path / "config.toml")
+
+        assert not (tmp_path / "pending_shutdown_ack.toml").exists()
+
+    def test_writes_nothing_without_a_config_path(
+            self, heartbeat_urlopen, no_sleep, run, no_op_finalize, tmp_path):
+        config = app_config_with_heartbeat(tmp_path, system=SystemConfig(running_on_pi=False))
+
+        system.shutdown(config, "remote_shutdown_command", command_id=61)
+
+        assert not (tmp_path / "pending_shutdown_ack.toml").exists()

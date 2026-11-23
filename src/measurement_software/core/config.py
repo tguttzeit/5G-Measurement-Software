@@ -1,8 +1,9 @@
 import copy
+import json
 import logging
 import socket
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ class CollectorConfig:
     """Thresholds controlling when a measurement is captured and when a session ends."""
 
     position_threshold: float = 15
-    max_idle_time: float = 200
+    max_idle_time: float = 1800
     max_wait_for_first_fix: float = 300
     wait_log_interval: float = 5
     keep_alive_host: str = "8.8.8.8"
@@ -68,9 +69,9 @@ class MovementGateConfig:
     """Pre-flight wait for confirmed vehicle movement, before Collector.collect() starts.
 
     Runs GNSS-only, at a low duty cycle - MovementGate itself never touches the modem or
-    quectel-CM either way. In Auto Mode both are already
-    open for the heartbeat by the time this wait starts, trading away the battery savings of
-    keeping them closed for always-on visibility. home_latitude/home_longitude are unset by
+    quectel-CM either way. In Auto Mode both are already open for the heartbeat by the time this
+    wait starts, trading away the battery savings of keeping them closed for always-on
+    visibility. home_latitude/home_longitude are unset by
     default, which falls back to pure movement-distance detection; set both to additionally
     require departure from a known garage/home position. With enabled = false the wait is
     skipped entirely and measuring starts right away (e.g. for drones, which may hover).
@@ -78,7 +79,7 @@ class MovementGateConfig:
 
     enabled: bool = True
     poll_interval_s: float = 45.0
-    movement_threshold: float = 15.0
+    movement_threshold: float = 10.0
     confirmations_required: int = 2
     home_latitude: float | None = None
     home_longitude: float | None = None
@@ -88,9 +89,10 @@ class MovementGateConfig:
 class QuectelCmConfig:
     """quectel-CM connection-manager daemon, started by this app itself, not by systemd at boot.
 
-    Both Auto Mode and Waiting Mode start it themselves right at boot, before anything else
-    happens, so the heartbeat has a cellular link the moment the app comes up - only the original battery-efficient design deferred
-    this until movement was confirmed.
+    Both Auto Mode and Manual Mode start it themselves right at boot, before anything else
+    happens, so the heartbeat has a cellular link the moment the app comes up. Deferring it until
+    movement is confirmed would save battery but leave an unattended device invisible while it
+    waits.
     """
 
     binary: str = "/add/your/quectel-CM/path/here"
@@ -117,7 +119,7 @@ class BackendConfig:
 
 @dataclass
 class HeartbeatConfig:
-    """Backend heartbeat path and cadence. Disabled unless a section says otherwise.
+    """Backend heartbeat path and cadence.
 
     `hmac_secret` authenticates the *response* to each heartbeat POST - distinct from
     `backend.device_key`, which authenticates the device's own outgoing requests. It verifies
@@ -125,9 +127,9 @@ class HeartbeatConfig:
     response, so a device that never expects remote commands can simply leave it unset.
     """
 
-    enabled: bool = False
-    path: str = "/heartbeat"
-    interval_s: float = 60.0
+    enabled: bool = True
+    path: str = "/api/heartbeat"
+    interval_s: float = 15.0
     timeout_s: float = 10.0
     success_log_interval_s: float = 600.0
     device_id: str = ""
@@ -148,8 +150,9 @@ class SelftestConfig:
 class GpsFixTestConfig:
     """Live GPS-fix-finding diagnostic run (run-gps-fix-test-now/stop-gps-fix-test-now).
 
-    Only meaningful in Waiting Mode - opens its own `GNSSReceiver`
-    and posts a small status payload (num_satellites, has_fix, elapsed_s) to `status_url` roughly
+    Only meaningful in Manual Mode, the one mode that blocks on remote commands with no run in
+    progress - opens its own `GNSSReceiver` and posts a small status payload (num_satellites,
+    has_fix, elapsed_s) to `status_url` roughly
     every `report_interval_s`, reusing `backend.device_key`/`heartbeat.device_id` for auth the
     same way `selftest.results_url` already does. Empty `status_url` by default: an unconfigured
     device still runs the diagnostic locally (logged only), matching that same precedent.
@@ -165,7 +168,9 @@ class GpsFixTestConfig:
 class StorageConfig:
     """Free-disk-space tripwire threshold for the upload backlog directory.
 
-    Not a retained-file cap or eviction policy - the backlog is expected to stay small - just a loud early warning in case that expectation turns out wrong.
+    Not a retained-file cap or eviction policy - a year of undelivered data would still be a
+    small fraction of the card - just a loud early warning in case that expectation turns out
+    wrong.
     """
 
     low_free_space_warning_bytes: int = 500_000_000
@@ -174,11 +179,11 @@ class StorageConfig:
 class DisplayConfig:
     """SSD1306 OLED status-display settings, for field diagnostics with no terminal attached.
 
-    Optional and disabled by default: an absent [display] section, or enabled=false, uses a
-    no-op display so the app runs unchanged without a screen attached.
+    On by default; with enabled=false a no-op display is used instead, so the app runs unchanged
+    on a device without a screen attached.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     type: str = "ssd1306"
     i2c_port: int = 1
     i2c_address: int = 0x3C
@@ -188,9 +193,10 @@ class DisplayConfig:
 class LatencyTestConfig:
     """flent-based latency measurements against a test server, on two independent cadences.
 
-    Disabled by default, and inert without a host: the tests need a server-side counterpart
-    (netperf/irtt, depending on the test) that is outside this repo's control, so an
-    unconfigured device must never start generating test traffic on its own.
+    On by default but inert without a host: the tests need a server-side counterpart
+    (netperf for the load test, a host that answers pings for the baseline) that is outside this
+    repo's control, so an unconfigured device must never start generating test traffic on its
+    own.
 
     The two cadences are separate because the tests cost very different amounts: a baseline
     ping is nearly free, while a load test deliberately saturates the link for its whole
@@ -201,7 +207,7 @@ class LatencyTestConfig:
     as moving as long as it cleared that threshold within this many seconds.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     host: str = ""
     flent_binary: str = "flent"
     baseline_test: str = "ping"
@@ -221,19 +227,14 @@ class UploaderConfig:
     The upload host is not configured here - see `BackendConfig`. `path` and `latency_path` are
     separate endpoints because they carry incompatible schemas - a GPS/cell measurement datapoint
     (timestamp/fix/cell_sample) is not shaped like a LatencyResult (start_fix/end_fix/rtt figures)
-    - see `Uploader`. For selftest SCP uploads, see upload_user/upload_host/upload_port/remote_dir.
+    - see `Uploader`.
     """
 
     upload_dir: str
-    path: str = "/upload"
-    latency_path: str = "/upload/latency"
+    path: str = "/api/measurements"
+    latency_path: str = "/api/latency-results"
     debug_upload: bool = True
     timeout_s: float = 10.0
-    # SCP settings for selftest uploader check only
-    upload_user: str = ""
-    upload_host: str = ""
-    upload_port: int = 22
-    remote_dir: str = ""
 
 @dataclass
 class LoggingConfig:
@@ -246,18 +247,17 @@ class LoggingConfig:
 
 @dataclass
 class SystemConfig:
-    """Raspberry Pi hardware settings: GPIO shutdown signalling and network interfaces to report.
+    """Raspberry Pi settings: boot mode, crash escalation limits and network interfaces to report.
 
-    `mode` selects the boot behavior: "auto" (default) waits battery-efficiently for confirmed
-    vehicle movement before opening the modem/quectel-CM, unchanged from before this field
-    existed. "waiting" opens the cellular link and starts heartbeating immediately at boot, then
-    does nothing further until an explicit remote command says what to do. Only takes effect on the next boot: switched remotely via the mode-waiting-now/
+    `mode` selects the boot behavior. Both modes open the cellular link and start heartbeating
+    right at boot; "auto" (default) then transitions into measuring on its own once MovementGate
+    confirms movement, while "manual" does nothing further until an explicit remote command says
+    what to do. Only takes effect on the next boot: switched remotely via the mode-manual-now/
     mode-auto-now one-shot commands, which persist `system_mode` to `config_overrides.toml`
     rather than mutating this field mid-run.
     """
 
     running_on_pi: bool = True
-    shutdown_gpio: int = 17
     network_interfaces: tuple[str, ...] = ("wlan0", "wwan0")
     mode: str = "auto"
     crash_same_error_limit: int = 3
@@ -267,14 +267,28 @@ class SystemConfig:
 class LinkWatchdogConfig:
     """Recovers a cellular link that stays down: restarts quectel-CM after `restart_after_s`
     without an IPv4 address on `interface`, and after `radio_reset_after_restarts` restarts that
-    didn't help, also resets the modem's radio. Only active with `system.running_on_pi`, since
-    quectel-CM is only started then."""
+    didn't help, also resets the modem's radio. While the link stays down, the wait before each
+    further step doubles, up to `max_restart_interval_s`; the next outage starts again from
+    `restart_after_s`. Only active with `system.running_on_pi`, since quectel-CM is only started
+    then."""
 
     enabled: bool = True
     interface: str = "wwan0"
     check_interval_s: float = 30.0
     restart_after_s: float = 180.0
+    max_restart_interval_s: float = 1800.0
     radio_reset_after_restarts: int = 2
+
+@dataclass
+class ClockConfig:
+    """Sets the system clock over NTP once the cellular link is up (the Pi has no RTC).
+
+    `ntp_server` is an IPv4 address or hostname queried once per link-up via SNTP until it
+    succeeds; empty (default) disables it. Device-specific, so set in config.local.toml.
+    """
+
+    ntp_server: str = ""
+    ntp_timeout_s: float = 3.0
 
 @dataclass
 class AppConfig:
@@ -298,6 +312,7 @@ class AppConfig:
     logging: LoggingConfig
     system: SystemConfig
     link_watchdog: LinkWatchdogConfig = field(default_factory=LinkWatchdogConfig)
+    clock: ClockConfig = field(default_factory=ClockConfig)
 
 def load_config(path: Path) -> AppConfig:
     """Reads config.toml and builds an AppConfig, applying defaults for omitted optional sections."""
@@ -318,24 +333,155 @@ def load_config(path: Path) -> AppConfig:
         storage=StorageConfig(**raw.get("storage", {})),
         display=DisplayConfig(**raw.get("display", {})),
         latency_test=LatencyTestConfig(**raw.get("latency_test", {})),
-        uploader=UploaderConfig(**raw["uploader"]),
+        uploader=UploaderConfig(**_without_removed_uploader_fields(raw["uploader"])),
         logging=LoggingConfig(**raw.get("logging", {})),
-        system=SystemConfig(**raw.get("system", {})),
+        system=SystemConfig(**_without_removed_system_fields(raw.get("system", {}))),
         link_watchdog=LinkWatchdogConfig(**raw.get("link_watchdog", {})),
+        clock=ClockConfig(**raw.get("clock", {})),
     )
-    _apply_mission_profile(config, raw.get("profiles", {}), path)
+    _read_legacy_system_mode_as_manual(config.system)
+    _ignore_leftover_profiles(raw)
     _validate_config(config)
     _apply_local_config_file(config, path)
     _apply_config_overrides_file(config, path)
     _warn_on_unset_identity_fields(config)
     return config
 
+VENDORED_QUECTEL_CM_BINARY = Path("vendor") / "quectel-CM" / "quectel-CM"
+LAST_GOOD_LINK_SETTINGS_FILENAME = "last_good_link_settings.json"
+
+@dataclass
+class LinkSettings:
+    """Just what bringing up and supervising the cellular link needs."""
+
+    running_on_pi: bool
+    quectel_cm: QuectelCmConfig
+    link_watchdog: LinkWatchdogConfig
+
+def load_link_settings(config_path: Path) -> LinkSettings:
+    """Reads the link settings leniently, for when load_config() itself failed. Never raises.
+
+    Only `[system] running_on_pi`, `[quectel_cm]` and `[link_watchdog]` are read, from
+    config.toml and the fields config.local.toml may set; nothing else in either file is looked
+    at, so no secret is touched. Underneath both lie the link settings of the last boot whose
+    config loaded (see config_sources.py::save_last_good_link_settings()): a single syntax error
+    makes config.toml unreadable as a whole, and with it the APN quectel-CM needs. An unreadable
+    file or a field of the wrong type is skipped and the value below it kept, the built-in default
+    at the bottom. A link watchdog that fails validation gets its defaults. Without a usable
+    quectel-CM binary the copy vendored next to config.toml is used, so the link can come up on a
+    device whose configuration is broken. Logs field and file names, never values.
+    """
+    from measurement_software.core.config_sources import ALLOWED_LOCAL_FIELDS, LOCAL_CONFIG_FILENAME
+    link_fields = {
+        "system": ("running_on_pi",),
+        "quectel_cm": tuple(f.name for f in fields(QuectelCmConfig)),
+        "link_watchdog": tuple(f.name for f in fields(LinkWatchdogConfig)),
+    }
+    last_good_path = config_path.parent / LAST_GOOD_LINK_SETTINGS_FILENAME
+    local_path = config_path.parent / LOCAL_CONFIG_FILENAME
+    sources = [
+        (last_good_path, _read_json_leniently(last_good_path), link_fields),
+        (config_path, _read_toml_leniently(config_path), link_fields),
+        (local_path, _read_toml_leniently(local_path), ALLOWED_LOCAL_FIELDS),
+    ]
+    system, quectel_cm, link_watchdog = SystemConfig(), QuectelCmConfig(), LinkWatchdogConfig()
+    for path, raw, allowed in sources:
+        system = _with_readable_fields(system, "system", raw, allowed, path)
+        quectel_cm = _with_readable_fields(quectel_cm, "quectel_cm", raw, allowed, path)
+        link_watchdog = _with_readable_fields(link_watchdog, "link_watchdog", raw, allowed, path)
+    try:
+        _validate_link_watchdog(link_watchdog)
+    except ValueError:
+        logger.warning("Ignoring [link_watchdog] - its values fail validation; using the defaults.")
+        link_watchdog = LinkWatchdogConfig()
+    if quectel_cm.binary in ("", _PLACEHOLDER_QUECTEL_CM_BINARY):
+        quectel_cm = replace(quectel_cm, binary=str(config_path.parent / VENDORED_QUECTEL_CM_BINARY))
+    return LinkSettings(system.running_on_pi, quectel_cm, link_watchdog)
+
+def _read_json_leniently(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        logger.warning("Ignoring %s - it can't be read (%s).", path.name, type(e).__name__)
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+def _read_toml_leniently(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        logger.warning("Ignoring %s - it can't be read (%s).", path.name, type(e).__name__)
+        return {}
+
+def _with_readable_fields(current, section: str, raw: dict, allowed: dict, path: Path):
+    """Returns `current` with the fields of `raw[section]` that `allowed` names and that have the
+    right type applied."""
+    values = raw.get(section)
+    if not isinstance(values, dict):
+        return current
+    updates = {}
+    for config_field in fields(current):
+        name = config_field.name
+        if name not in values or name not in allowed.get(section, ()):
+            continue
+        value = _coerced(values[name], getattr(current, name))
+        if value is None:
+            logger.warning("Ignoring %s.%s in %s - wrong type.", section, name, path.name)
+            continue
+        updates[name] = value
+    return replace(current, **updates)
+
+def _coerced(value: object, default: object) -> object | None:
+    """`value` as the type of `default`, or None if it isn't one."""
+    if isinstance(default, bool) or isinstance(value, bool):
+        return value if isinstance(value, bool) and isinstance(default, bool) else None
+    if isinstance(default, float):
+        return float(value) if isinstance(value, (int, float)) else None
+    if isinstance(default, tuple):
+        is_strings = isinstance(value, list) and all(isinstance(item, str) for item in value)
+        return tuple(value) if is_strings else None
+    return value if isinstance(value, type(default)) else None
+
+_REMOVED_UPLOADER_FIELDS = ("upload_user", "upload_host", "upload_port", "remote_dir")
+
+def _without_removed_uploader_fields(raw_uploader: dict) -> dict:
+    """Drops the SCP-only [uploader] fields an old config.toml may still carry, warning once.
+
+    Only the field names are logged, never their values. Not rejected: a config.toml failure
+    stops boot before the cellular link is up, over fields that no longer do anything.
+    """
+    leftovers = [name for name in _REMOVED_UPLOADER_FIELDS if name in raw_uploader]
+    if leftovers:
+        logger.warning(
+            "Ignoring removed [uploader] field(s) in config.toml: %s. The selftest no longer uploads "
+            "via scp - delete them.", ", ".join(leftovers),
+        )
+    return {k: v for k, v in raw_uploader.items() if k not in _REMOVED_UPLOADER_FIELDS}
+
+_REMOVED_SYSTEM_FIELDS = ("shutdown_gpio",)
+
+def _without_removed_system_fields(raw_system: dict) -> dict:
+    """Drops settings that no longer exist from the [system] table, with one warning per field.
+
+    A leftover in a device's config.toml must not fail the boot: that would end it before the
+    cellular link is up, leaving the device unreachable.
+    """
+    for name in _REMOVED_SYSTEM_FIELDS:
+        if name in raw_system:
+            logger.warning("Ignoring system.%s - this setting was removed.", name)
+    return {name: value for name, value in raw_system.items() if name not in _REMOVED_SYSTEM_FIELDS}
+
 _PLACEHOLDER_BACKEND_URL = "https://add.your.backend.here"
 _PLACEHOLDER_QUECTEL_CM_BINARY = "/add/your/quectel-CM/path/here"
 
 def _warn_on_unset_identity_fields(config: AppConfig) -> None:
     """Logs a warning for each per-device identity/secret field still left unset or at its
-    config.toml placeholder - the fields config.local.toml exists to hold (see issue #25).
+    config.toml placeholder - the fields config.local.toml exists to hold.
 
     Warns rather than raising: unlike the GPIO/home-position ValueErrors above, an unset field
     here degrades gracefully at runtime (failed uploads, 401s, remote commands disabled) rather
@@ -366,32 +512,28 @@ def _warn_on_unset_identity_fields(config: AppConfig) -> None:
             "quectel_cm.binary is unset or still a placeholder - set it in config.local.toml."
         )
 
-def _apply_mission_profile(config: AppConfig, raw_profiles: object, config_path: Path) -> None:
-    """Applies the `[profiles.*]` table matching the device's mission type onto the config.
+def _ignore_leftover_profiles(raw: dict) -> None:
+    """Warns about `[profiles.*]` tables left in an old config.toml; their content is ignored.
 
-    Sits between config.toml and config.local.toml in the precedence order, so it overrides the
-    config.toml values but still gives way to local and remote settings. The mission type is
-    resolved first: a `device_mission_type` remote override counts, since it decides which
-    profile applies. All profiles are validated even if only one applies; invalid ones raise.
-
-    Deferred import for the same circularity reason as _apply_local_config_file().
+    Not rejected: a config.toml failure stops boot before the cellular link is up, leaving the
+    device without heartbeat or SSH over something it can safely skip. Only the table names are
+    logged, never their values.
     """
-    from measurement_software.core.config_sources import OVERRIDES_FILENAME, apply_overrides, load_overrides, parse_profiles
-    profiles = parse_profiles(raw_profiles)
-    overrides = load_overrides(config_path.parent / OVERRIDES_FILENAME)
-    mission_type = overrides.device_mission_type or config.device.mission_type
-    profile = profiles.get(mission_type)
-    if profile is None:
+    if "profiles" not in raw:
         return
-    logger.info("Applying settings profile %r.", mission_type)
-    apply_overrides(config, profile)
+    leftover = raw["profiles"]
+    names = [f"[profiles.{name}]" for name in leftover] if isinstance(leftover, dict) else ["profiles"]
+    logger.warning(
+        "Settings profiles were removed; ignoring %s in config.toml. mission_type is only a label.",
+        ", ".join(names),
+    )
 
 def _apply_local_config_file(config: AppConfig, config_path: Path) -> None:
     """Merges a sibling config.local.toml onto the just-built config, if one exists.
 
-    Applied before config_overrides.toml: config.toml defaults first,
-    then config.local.toml (per-device identity/secrets set by hand at setup time), then
-    config_overrides.toml (remote runtime tuning) merged last. Deferred import: core.config_sources
+    Applied before config_overrides.toml: config.toml defaults first, then config.local.toml
+    (per-device identity/secrets set by hand at setup time), then config_overrides.toml (remote
+    runtime tuning) merged last. Deferred import: core.config_sources
     itself needs AppConfig from this module, so importing it at module level here would be
     circular.
     """
@@ -403,7 +545,7 @@ def _apply_config_overrides_file(config: AppConfig, config_path: Path) -> None:
     """Merges a sibling config_overrides.toml onto the just-built config, if one exists.
 
     The checks in _validate_config() run again on the result, since an override can break what
-    config.toml itself satisfied (e.g. a shutdown pin landing on the display's I2C pins). A
+    config.toml itself satisfied (e.g. a home position with only one coordinate set). A
     violation never stops boot - the device may have no one at it to fix a bad remote value -
     so the override fields in the violated check's scope are dropped and logged, leaving the
     config.toml/config.local.toml values, which already passed. Those alone still raise.
@@ -451,7 +593,26 @@ def _validate_movement_gate_home_position(config: MovementGateConfig) -> None:
             "movement_gate.home_latitude and home_longitude must both be set, or both left unset."
         )
 
-_VALID_SYSTEM_MODES = ("auto", "waiting")
+_VALID_SYSTEM_MODES = ("auto", "manual")
+
+# Manual Mode's name before it was renamed. Devices, their config files and backends from before
+# the rename still carry it, so exactly this one value is read as "manual"; anything else is still
+# rejected.
+LEGACY_MANUAL_SYSTEM_MODE = "waiting"
+
+def _read_legacy_system_mode_as_manual(config: SystemConfig) -> None:
+    """Maps a config.toml `mode` still holding Manual Mode's old name to "manual", with a warning.
+
+    Not rejected like other invalid modes: a config.toml failure stops boot before the cellular
+    link is up, leaving the device without heartbeat or SSH over something it can safely read.
+    """
+    if config.mode != LEGACY_MANUAL_SYSTEM_MODE:
+        return
+    logger.warning(
+        "config.toml system.mode %r is Manual Mode's old name - reading it as 'manual'.",
+        LEGACY_MANUAL_SYSTEM_MODE,
+    )
+    config.mode = "manual"
 
 def _validate_system_mode(config: AppConfig) -> None:
     """Raises ValueError if system.mode is unrecognized."""
@@ -478,32 +639,25 @@ def _validate_crash_limits(config: SystemConfig) -> None:
             raise ValueError(f"system.{name} must be at least 1, got {getattr(config, name)}.")
 
 def _validate_link_watchdog(config: LinkWatchdogConfig) -> None:
-    """Raises ValueError for non-positive intervals or a negative restart count."""
+    """Raises ValueError for non-positive intervals, a maximum interval below the first one, or
+    a negative restart count."""
     for name in ("check_interval_s", "restart_after_s"):
         if getattr(config, name) <= 0:
             raise ValueError(f"link_watchdog.{name} must be positive, got {getattr(config, name)}.")
+    if config.max_restart_interval_s < config.restart_after_s:
+        raise ValueError(
+            f"link_watchdog.max_restart_interval_s must be at least restart_after_s "
+            f"({config.restart_after_s}), got {config.max_restart_interval_s}."
+        )
     if config.radio_reset_after_restarts < 0:
         raise ValueError(
             f"link_watchdog.radio_reset_after_restarts must not be negative, got {config.radio_reset_after_restarts}."
         )
 
-_ONBOARD_UART_PORTS = frozenset({"/dev/serial0", "/dev/ttyAMA0", "/dev/ttyS0"})
-
-def _validate_gpio_pins(config: AppConfig) -> None:
-    """Raises ValueError if two GPIO consumers are configured to use the same pin."""
-    claims: dict[int, str] = {}
-    _claim_gpio_pin(claims, config.system.shutdown_gpio, "system.shutdown_gpio")
-    if config.display.enabled:
-        _claim_gpio_pin(claims, 2, "display (I2C SDA1, fixed)")
-        _claim_gpio_pin(claims, 3, "display (I2C SCL1, fixed)")
-    if config.gnss_receiver.port in _ONBOARD_UART_PORTS:
-        _claim_gpio_pin(claims, 14, "gnss_receiver (UART TXD, fixed)")
-        _claim_gpio_pin(claims, 15, "gnss_receiver (UART RXD, fixed)")
-
-def _claim_gpio_pin(claims: dict[int, str], pin: int, owner: str) -> None:
-    if pin in claims:
-        raise ValueError(f"GPIO pin conflict: {owner} and {claims[pin]} both use pin {pin}")
-    claims[pin] = owner
+def _validate_clock(config: ClockConfig) -> None:
+    """Raises ValueError for a non-positive NTP timeout."""
+    if config.ntp_timeout_s <= 0:
+        raise ValueError(f"clock.ntp_timeout_s must be positive, got {config.ntp_timeout_s}.")
 
 def _validate_config(config: AppConfig) -> None:
     for check, _ in _CHECKS_WITH_OVERRIDE_SCOPE:
@@ -512,13 +666,13 @@ def _validate_config(config: AppConfig) -> None:
 # Each check with the override fields that can influence its outcome: if a check fails after
 # overrides were applied, exactly these are dropped. Scoped this widely (not per offending field)
 # because a check can span several fields - the home position's latitude and longitude only make
-# sense as a pair, and a pin conflict is between two settings.
+# sense as a pair.
 _CHECKS_WITH_OVERRIDE_SCOPE = (
-    (_validate_gpio_pins, ("system_shutdown_gpio", "display_enabled")),
     (lambda config: _validate_movement_gate_home_position(config.movement_gate),
      ("movement_gate_home_latitude", "movement_gate_home_longitude")),
     (_validate_system_mode, ("system_mode",)),
     (lambda config: _validate_modem_reconnect(config.collector), ()),
     (lambda config: _validate_crash_limits(config.system), ()),
     (lambda config: _validate_link_watchdog(config.link_watchdog), ()),
+    (lambda config: _validate_clock(config.clock), ()),
 )

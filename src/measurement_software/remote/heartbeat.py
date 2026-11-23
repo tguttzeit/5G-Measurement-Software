@@ -7,6 +7,7 @@ import logging
 import secrets
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.client import HTTPException
 from pathlib import Path
@@ -16,9 +17,10 @@ from measurement_software.core.config import BackendConfig, HeartbeatConfig
 from measurement_software.core.config_sources import (
     promote_overrides,
     sanitize_overrides,
+    write_manual_next_boot_marker,
     write_overrides_file,
 )
-from measurement_software.core.run_phase import RunPhase, WaitingLoop
+from measurement_software.core.run_phase import IDLE_PHASES, ManualModeLoop, RunPhase, RunPhaseState
 from measurement_software.core.uploader import Uploader
 from measurement_software.core.util import build_backend_url
 from measurement_software.remote.gps_fix_test import GpsFixTestRunner
@@ -35,11 +37,13 @@ if TYPE_CHECKING:
     from measurement_software.core.collector import Collector
 
 SIGNATURE_PREFIX = "hmac-sha256:"
+_REMAINING_ACK_ATTEMPTS = 3
+_REMAINING_ACK_RETRY_DELAY_S = 2.0
 
 
 class CommandNotApplicable(Exception):
     """Raised by a one-shot command handler when its effect genuinely does not apply right now
-    (e.g. stop-measuring-now with no run active, start-measuring-now outside Waiting Mode) -
+    (e.g. stop-measuring-now with no run active, start-measuring-now while already measuring) -
     distinct from a failure. Logged quietly at info level, acked as "not_applicable" rather than
     "success" or "failed", and never marked executed, so a later redelivery (device state may
     have changed by then) can simply try again."""
@@ -68,12 +72,17 @@ class HeartbeatSender:
         self._run_phase = run_phase
         self._gps_fix_status = gps_fix_status
         self._critical_error = critical_error
+        self._recovery: dict | None = None
         self._stop_event: threading.Event | None = None
         self._thread: threading.Thread | None = None
         self._remote_commands = None
         self._last_delivery_log_at: float | None = None
         self._delivered_since_log = 0
         self._failed_since_delivery = 0
+
+    def set_recovery(self, details: dict | None) -> None:
+        """Reports why the device is in the recovery state, from the next heartbeat on; None ends it."""
+        self._recovery = details
 
     def set_remote_commands(self, remote_commands) -> None:
         """Wires in the collaborator that verifies/applies commands carried on each response.
@@ -94,25 +103,41 @@ class HeartbeatSender:
         self._thread.start()
 
     def stop(self) -> None:
-        """Signals the reporting thread to stop and waits for it to exit."""
-        if self._stop_event is not None:
-            self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join()
-            self._thread = None
+        """Signals the reporting thread to stop, waits for it to exit, then delivers the acks
+        it left queued."""
+        if self._thread is None:
+            return
+        self._stop_event.set()
+        self._thread.join()
+        self._thread = None
+        self._deliver_remaining_acks()
 
-    def send_pending_acks_now(self) -> None:
-        """Sends one heartbeat immediately, only if a wired dispatcher has an ack queued.
+    def _deliver_remaining_acks(self) -> None:
+        """Sends what the dispatcher still has queued, with a bounded number of attempts.
 
-        For a caller that's about to stop() this sender and can't wait for the next scheduled
-        tick to flush a just-recorded ack - e.g. Collector.collect() ending a run via
-        stop-measuring-now, whose success ack would otherwise sit queued on a background
-        thread that's about to be stopped (possibly followed by the process exiting entirely,
-        confirmed live during the issue #50 field test). A no-op when there's nothing pending,
-        so it's safe to call unconditionally.
+        A command handled on the last tick (stop-measuring-now ending the run, which ends the
+        process soon after) would otherwise never be acked: the backend redelivers it to the
+        next process, which can then only answer `not_applicable`. Runs after the reporting
+        thread has exited, so the dispatcher is no longer touched from two threads. Commands
+        the response carries are left for the backend to redeliver, not executed while the
+        device is stopping. Bounded so an unreachable backend cannot hold up the shutdown.
         """
-        if self._remote_commands is not None and self._remote_commands.pending_acks():
-            self.send_once(self._run_status.status(), self._storage_status.status())
+        if self._remote_commands is None:
+            return
+        for attempt in range(_REMAINING_ACK_ATTEMPTS):
+            if not self._remote_commands.pending_acks():
+                return
+            if attempt:
+                time.sleep(_REMAINING_ACK_RETRY_DELAY_S)
+            self.send_once(
+                self._run_status.status(), self._storage_status.status(), dispatch_commands=False,
+            )
+        undelivered = self._remote_commands.pending_acks()
+        if undelivered:
+            self._logger.warning(
+                "%d command ack(s) not delivered before stopping: %s",
+                len(undelivered), [ack["id"] for ack in undelivered],
+            )
 
     def is_usable(self) -> bool:
         """Reports whether this run should send heartbeats, saying loudly why if it shouldn't."""
@@ -136,7 +161,7 @@ class HeartbeatSender:
 
     def send_once(
         self, run_status: RunStatus, storage_status: StorageStatus,
-        extra_executed_commands: list[dict] | None = None,
+        extra_executed_commands: list[dict] | None = None, dispatch_commands: bool = True,
     ) -> bool:
         """Posts one status report, returning whether it was accepted.
 
@@ -149,6 +174,8 @@ class HeartbeatSender:
         unified shutdown/reboot sequence, which sends one last heartbeat after the dispatcher
         that originally received the command is already gone) still ack a specific command id.
         Combined with whatever the dispatcher itself has queued, if one is wired.
+        `dispatch_commands=False` still clears the delivered acks but leaves the response's
+        commands unexecuted.
         """
         nonce = secrets.token_hex(16)
         payload = run_status.as_payload()
@@ -162,6 +189,9 @@ class HeartbeatSender:
             payload["gps_fix"] = self._gps_fix_status.status().as_payload()
         if self._critical_error is not None:
             payload["critical_error"] = self._critical_error
+        recovery = self._recovery
+        if recovery is not None:
+            payload["recovery"] = recovery
         acks = list(extra_executed_commands or [])
         if self._remote_commands is not None:
             acks.extend(self._remote_commands.pending_acks())
@@ -187,8 +217,13 @@ class HeartbeatSender:
                 self._log_delivery(response.status)
                 if self._remote_commands is not None:
                     self._remote_commands.clear_acks()
-                    self._process_remote_response(response, nonce)
+                    if dispatch_commands:
+                        self._process_remote_response(response, nonce)
                 return True
+        except urllib.error.HTTPError as e:
+            self._failed_since_delivery += 1
+            self._logger.warning("Heartbeat rejected by the backend (HTTP %s): %s", e.code, _rejection_reason(e))
+            return False
         except (OSError, HTTPException) as e:
             self._failed_since_delivery += 1
             self._logger.warning("Heartbeat could not be sent: %s", e)
@@ -230,6 +265,20 @@ class HeartbeatSender:
         self._remote_commands.handle_response(body, nonce)
 
 
+_MAX_REJECTION_REASON_CHARS = 500
+
+
+def _rejection_reason(error: urllib.error.HTTPError) -> str:
+    """The start of the backend's response body - for a 422, which field it refused and why."""
+    try:
+        body = error.read()
+    except Exception:
+        body = None
+    if not body:
+        return error.reason or "no reason given"
+    return body[:_MAX_REJECTION_REASON_CHARS].decode(errors="replace")
+
+
 class RemoteCommandDispatcher:
     """Verifies and applies the config overrides / one-shot commands a heartbeat response carries.
 
@@ -243,17 +292,24 @@ class RemoteCommandDispatcher:
     `Collector`, but `Collector.request_sim_reset()` itself decides whether to act immediately on
     this thread (no run active yet, so nothing else is touching the modem) or defer to the
     collection thread (a run is active, and the modem's serial connection isn't thread-safe).
-    `stop-measuring-now` also persists a next-boot "waiting" mode override, same as
-    `mode-waiting-now` below, per the device ending up in Waiting Mode once the run it interrupted
-    finishes its normal finalize/upload/shutdown sequence. `mode-waiting-now`/
+    `stop-measuring-now` also applies while a run started in Manual Mode is still waiting for its
+    first GPS fix (it returns the device to the manual idle); in Auto Mode it is only applicable to
+    a run that is actually measuring. It also leaves a one-shot marker that puts the next boot into
+    Manual Mode once (only when the device is in Auto Mode; a persistent Manual Mode needs no
+    marker). It is not a `system_mode` override, so nothing persistent changes. `mode-manual-now`/
     `mode-auto-now` persist the next-boot device mode as the `system_mode` config override.
     A response carrying overrides or commands is only accepted if it echoes the nonce of the
     request it answers (see `handle_response`), so a captured signed response can't be replayed.
-    `start-measuring-now` and `run-selftest-now` hand off to `WaitingLoop`, only meaningful while
-    the device is in Waiting Mode. `run-gps-fix-test-now`/`stop-gps-fix-test-now` hand off to their
-    own `GpsFixTestRunner` collaborator instead, since that run keeps going on its own background
-    thread for up to `gps_fix_test.timeout_s` rather than being handled synchronously like
-    `run-selftest-now` - also only meaningful in Waiting Mode. `promote-overrides-now` bakes
+    `start-measuring-now` and `run-selftest-now` hand off to `ManualModeLoop`, only meaningful while
+    the device is idle in Manual Mode. `run-gps-fix-test-now`/`stop-gps-fix-test-now` hand off to
+    their own `GpsFixTestRunner` collaborator instead, since that run keeps going on its own
+    background thread for up to `gps_fix_test.timeout_s` rather than being handled synchronously
+    like `run-selftest-now` - also only meaningful while idle in Manual Mode, and not at all
+    without GNSS hardware (no runner is given then). Whether the device is idle is decided by the
+    current `run_phase` (one of `IDLE_PHASES`: Manual Mode idle or the recovery state), not by the mode it booted in: during
+    measuring the loop and the runner still exist, but acting on them would do nothing or open a
+    second reader on the GNSS port the collector holds. Without a `run_phase` these four are
+    never applicable. `promote-overrides-now` bakes
     whatever is currently set in config_overrides.toml into config.toml as the new baseline (see
     core/config_sources.py::promote_overrides) - takes effect from the next load_config() call,
     same as every other config_overrides.toml change.
@@ -262,17 +318,20 @@ class RemoteCommandDispatcher:
     def __init__(
         self, hmac_secret: str, overrides_path: Path,
         uploader: Uploader, collector: Collector,
-        waiting_loop: WaitingLoop | None = None, gps_fix_test_runner: GpsFixTestRunner | None = None,
-        config_path: Path | None = None,
+        manual_mode_loop: ManualModeLoop | None = None, gps_fix_test_runner: GpsFixTestRunner | None = None,
+        config_path: Path | None = None, run_phase: RunPhase | None = None,
+        manual_next_boot_path: Path | None = None,
     ):
         self._logger = logging.getLogger(__name__)
         self._hmac_secret = hmac_secret
         self._overrides_path = overrides_path
         self._uploader = uploader
         self._collector = collector
-        self._waiting_loop = waiting_loop
+        self._manual_mode_loop = manual_mode_loop
         self._gps_fix_test_runner = gps_fix_test_runner
         self._config_path = config_path
+        self._run_phase = run_phase
+        self._manual_next_boot_path = manual_next_boot_path
         self._executed_command_ids: set = set()
         self._command_outcomes: dict = {}
         self._pending_acks: list[dict] = []
@@ -388,7 +447,7 @@ class RemoteCommandDispatcher:
             # shutdown-now/reboot-now ack themselves on their own schedule, not via the generic
             # success path below: shutdown-now's only ever ack is the "received" the unified
             # shutdown sequence's terminal heartbeat sends on the way out (core/system.py::
-            # shutdown()); reboot-now's "success" only comes from seed_reboot_success_ack() once
+            # shutdown()); reboot-now's "success" only comes from seed_success_ack() once
             # the next boot proves the reboot actually happened. Recording a generic "success"
             # here - right as the command is merely received, before either has actually
             # happened - would race those real acks on this dispatcher's own next heartbeat tick.
@@ -414,19 +473,19 @@ class RemoteCommandDispatcher:
         self._command_outcomes[command_id] = outcome
         self._pending_acks.append(outcome)
 
-    def seed_reboot_success_ack(self, command_id: object) -> None:
-        """Called once at startup with a reboot-now id the previous boot's reboot() persisted
-        (see config_sources.py::write_pending_reboot_ack) - the device being back up and
+    def seed_success_ack(self, command_id: object, command_name: str) -> None:
+        """Called once at startup with a command id the previous boot persisted on its way out
+        (see config_sources.py::write_pending_command_ack) - the device being back up and
         running this is itself the proof that command actually succeeded, which the "received"
         ack sent on the way out couldn't promise.
 
-        Marks the id executed, not just acked: reboot-now's queue entry may not be cleared on
+        Marks the id executed, not just acked: the command's queue entry may not be cleared on
         the backend yet by the time this dispatcher first sees it, and a fresh process has no
-        memory of already having rebooted for it - without this, that redelivery would read as
-        a brand new reboot-now and reboot the device again, forever.
+        memory of already having executed it - without this, that redelivery would read as a
+        brand new command and run it again, forever.
         """
         self._executed_command_ids.add(command_id)
-        self._record_outcome(command_id, "reboot-now", "success")
+        self._record_outcome(command_id, command_name, "success")
 
     def pending_acks(self) -> list[dict]:
         """The command outcomes queued to go out on the next heartbeat, oldest first."""
@@ -447,41 +506,63 @@ class RemoteCommandDispatcher:
         self._collector.request_reboot(entry["id"])
 
     def _handle_stop_measuring(self, entry: dict) -> None:
-        if not self._collector.is_collecting:
+        if not (self._collector.is_collecting or self._is_waiting_for_first_fix_in_manual_mode()):
             raise CommandNotApplicable("device is not actively measuring - nothing to stop")
-        write_overrides_file(self._overrides_path, {"system_mode": "waiting"})
+        if self._manual_mode_loop is None and self._manual_next_boot_path is not None:
+            write_manual_next_boot_marker(self._manual_next_boot_path)
         self._collector.request_stop_measuring()
+
+    def _is_waiting_for_first_fix_in_manual_mode(self) -> bool:
+        """Whether a started run is still waiting for its first GPS fix and the operator can abort it.
+
+        Only Manual Mode: there, stop-measuring-now returns the device to the manual idle. In
+        Auto Mode nothing was started by a command, so there is nothing to abort.
+        """
+        return (
+            self._manual_mode_loop is not None
+            and self._run_phase is not None
+            and self._run_phase.get() == RunPhaseState.WAITING_FOR_GPS_FIX
+        )
 
     def _handle_sim_reset(self, entry: dict) -> None:
         self._collector.request_sim_reset()
 
-    def _handle_mode_waiting(self, entry: dict) -> None:
-        write_overrides_file(self._overrides_path, {"system_mode": "waiting"})
-        self._logger.info("Persisted device mode 'waiting' (takes effect next boot).")
+    def _handle_mode_manual(self, entry: dict) -> None:
+        write_overrides_file(self._overrides_path, {"system_mode": "manual"})
+        self._logger.info("Persisted device mode 'manual' (takes effect next boot).")
 
     def _handle_mode_auto(self, entry: dict) -> None:
         write_overrides_file(self._overrides_path, {"system_mode": "auto"})
         self._logger.info("Persisted device mode 'auto' (takes effect next boot).")
 
+    def _require_manual_idle(self) -> None:
+        phase = self._run_phase.get() if self._run_phase is not None else "unknown"
+        if phase not in IDLE_PHASES:
+            raise CommandNotApplicable(f"device is not idle in Manual Mode or the recovery state (phase: {phase})")
+
+    def _require_gps_fix_test_runner(self) -> GpsFixTestRunner:
+        self._require_manual_idle()
+        if self._gps_fix_test_runner is None:
+            raise CommandNotApplicable("GPS disabled")
+        return self._gps_fix_test_runner
+
     def _handle_start_measuring(self, entry: dict) -> None:
-        if self._waiting_loop is None:
-            raise CommandNotApplicable("device is not in Waiting Mode")
-        self._waiting_loop.request_start_measuring()
+        self._require_manual_idle()
+        if self._manual_mode_loop is None:
+            raise CommandNotApplicable("device is not in Manual Mode")
+        self._manual_mode_loop.request_start_measuring()
 
     def _handle_run_selftest(self, entry: dict) -> None:
-        if self._waiting_loop is None:
-            raise CommandNotApplicable("device is not in Waiting Mode")
-        self._waiting_loop.request_run_selftest()
+        self._require_manual_idle()
+        if self._manual_mode_loop is None:
+            raise CommandNotApplicable("device is not in Manual Mode")
+        self._manual_mode_loop.request_run_selftest()
 
     def _handle_run_gps_fix_test(self, entry: dict) -> None:
-        if self._gps_fix_test_runner is None:
-            raise CommandNotApplicable("device is not in Waiting Mode")
-        self._gps_fix_test_runner.start()
+        self._require_gps_fix_test_runner().start()
 
     def _handle_stop_gps_fix_test(self, entry: dict) -> None:
-        if self._gps_fix_test_runner is None:
-            raise CommandNotApplicable("device is not in Waiting Mode")
-        self._gps_fix_test_runner.stop()
+        self._require_gps_fix_test_runner().stop()
 
     def _handle_promote_overrides(self, entry: dict) -> None:
         if self._config_path is None:
@@ -501,7 +582,9 @@ _ONE_SHOT_HANDLERS: dict[str, Callable[["RemoteCommandDispatcher", dict], str | 
     "reboot-now": RemoteCommandDispatcher._handle_reboot,
     "stop-measuring-now": RemoteCommandDispatcher._handle_stop_measuring,
     "sim-reset-now": RemoteCommandDispatcher._handle_sim_reset,
-    "mode-waiting-now": RemoteCommandDispatcher._handle_mode_waiting,
+    "mode-manual-now": RemoteCommandDispatcher._handle_mode_manual,
+    # Manual Mode's command name before the rename, still accepted from backends that send it.
+    "mode-waiting-now": RemoteCommandDispatcher._handle_mode_manual,
     "mode-auto-now": RemoteCommandDispatcher._handle_mode_auto,
     "start-measuring-now": RemoteCommandDispatcher._handle_start_measuring,
     "run-selftest-now": RemoteCommandDispatcher._handle_run_selftest,

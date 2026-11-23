@@ -1,29 +1,76 @@
 import fcntl
+import json
 import logging
 import math
 import tomllib
 from contextlib import contextmanager
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Iterator
 
 import tomlkit
 
-from measurement_software.core.config import AppConfig
-from measurement_software.core.util import flush_to_disk, fsync_directory
+from measurement_software.core.config import LAST_GOOD_LINK_SETTINGS_FILENAME, LEGACY_MANUAL_SYSTEM_MODE, AppConfig
+from measurement_software.core.util import flush_to_disk, fsync_directory, write_json_atomically
 
 logger = logging.getLogger(__name__)
 
 LEGACY_MODE_OVERRIDE_FILENAME = "mode_override.toml"
 PENDING_REBOOT_ACK_FILENAME = "pending_reboot_ack.toml"
+PENDING_SHUTDOWN_ACK_FILENAME = "pending_shutdown_ack.toml"
+MANUAL_NEXT_BOOT_FILENAME = "manual_next_boot.json"
+_MANUAL_NEXT_BOOT_MARKER = {"manual_next_boot": True}
 
 
-def write_pending_reboot_ack(path: Path, command_id: Any) -> None:
-    """Persists a reboot-now command's id so the next boot can ack it as actually successful.
+def write_manual_next_boot_marker(path: Path) -> None:
+    """Leaves the one-shot "boot into Manual Mode once" marker that stop-measuring-now sets.
 
-    Written right before perform_reboot() cuts this process off for good - there is no later
+    Deliberately not a `system_mode` override: nothing persistent changes, so a crash between
+    the command and the end of the run cannot leave the device in Manual Mode for good.
+    """
+    write_json_atomically(path, _MANUAL_NEXT_BOOT_MARKER)
+
+
+def manual_next_boot_marker_present(path: Path) -> bool:
+    """Whether a valid marker is waiting. Does not consume it - see consume_manual_next_boot_marker().
+
+    A file that is not exactly the marker written by write_manual_next_boot_marker() (corrupt,
+    unknown content) is logged and removed, never treated as a request for Manual Mode.
+    """
+    try:
+        with open(path) as f:
+            content = json.load(f)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        content = None
+    if content == _MANUAL_NEXT_BOOT_MARKER:
+        return True
+    logger.error("Ignoring and removing the invalid next-boot Manual Mode marker %s.", path.name)
+    discard_manual_next_boot_marker(path)
+    return False
+
+
+def consume_manual_next_boot_marker(path: Path) -> None:
+    """Removes the marker once the device has actually entered Manual Mode because of it."""
+    discard_manual_next_boot_marker(path)
+    logger.info("Consumed the one-shot next-boot Manual Mode marker.")
+
+
+def discard_manual_next_boot_marker(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+        fsync_directory(path.parent)
+    except OSError:
+        logger.exception("Could not remove the next-boot Manual Mode marker %s.", path.name)
+
+
+def write_pending_command_ack(path: Path, command_id: Any) -> None:
+    """Persists a command's id so the next boot can ack it as actually successful.
+
+    Written right before the reboot or shutdown cuts this process off for good - there is no later
     heartbeat tick within the same run to send a real success ack from, unlike every other
-    one-shot command. The next boot's main() reads this (see read_and_clear_pending_reboot_ack())
+    one-shot command. The next boot's main() reads this (see read_and_clear_pending_command_ack())
     and seeds it into the new RemoteCommandDispatcher, so the very first heartbeat after the
     reboot reports what actually happened, not just the "received" the old process managed to
     send on its way out. Same atomic-write durability pattern as _write_overrides_raw().
@@ -37,9 +84,9 @@ def write_pending_reboot_ack(path: Path, command_id: Any) -> None:
     fsync_directory(path.parent)
 
 
-def read_and_clear_pending_reboot_ack(path: Path) -> Any | None:
-    """Reads and removes the pending reboot-now ack left by the previous boot's reboot(), or
-    None if none is set. Removed immediately (not just on success) so a corrupt or stale file
+def read_and_clear_pending_command_ack(path: Path) -> Any | None:
+    """Reads and removes the pending command ack the previous boot left at `path`, or None if
+    none is set. Removed immediately (not just on success) so a corrupt or stale file
     can never be reapplied on a later boot."""
     if not path.exists():
         return None
@@ -92,8 +139,8 @@ _BOOL = FieldSpec("bool")
 # since 0 would spin. collector_max_wait_for_first_fix gets a tighter upper bound (1 hour) since it gates
 # the very start of a run - an unbounded wait for a fix that never arrives could burn an entire
 # field deployment day before anything is captured. movement_gate_confirmations_required gets a
-# small integer ceiling - an unbounded value could mean the device never leaves LOW_POWER_WAITING
-# at all. The last group (modem/GNSS/GPIO) is validated exactly like the rest; the frontend's
+# small integer ceiling - an unbounded value could mean the device never confirms movement and so
+# never starts measuring at all. The last group (modem/GNSS/GPIO) is validated exactly like the rest; the frontend's
 # "do you know what you are doing" confirmation for it is not a device concern.
 FIELD_SPECS: dict[str, FieldSpec] = {
     "idle_threshold_s": _float(0, 86400),
@@ -118,7 +165,7 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     "movement_gate_home_longitude": _nullable_float(-180, 180),
     "movement_gate_home_departure_threshold": _float(1, 10000),
     "latency_test_enabled": _BOOL,
-    "system_mode": _enum("auto", "waiting"),
+    "system_mode": _enum("auto", "manual"),
     "device_mission_type": _enum("ground", "drone"),
     "display_enabled": _BOOL,
     "display_refresh_interval_s": _float(0.5, 3600),
@@ -128,7 +175,6 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     "gnss_receiver_retries": _int(0, 20),
     "gnss_receiver_retry_delay_s": _float(0, 60),
     "system_running_on_pi": _BOOL,
-    "system_shutdown_gpio": _int(2, 27),
 }
 
 ALLOWED_OVERRIDE_FIELDS = tuple(FIELD_SPECS)
@@ -176,7 +222,6 @@ OVERRIDE_FIELD_TARGETS: dict[str, tuple[tuple[str, str], ...]] = {
     "gnss_receiver_retries": (("gnss_receiver", "retries"),),
     "gnss_receiver_retry_delay_s": (("gnss_receiver", "retry_delay_s"),),
     "system_running_on_pi": (("system", "running_on_pi"),),
-    "system_shutdown_gpio": (("system", "shutdown_gpio"),),
 }
 
 
@@ -238,7 +283,6 @@ class ConfigOverrides:
     gnss_receiver_retries: int | None = None
     gnss_receiver_retry_delay_s: float | None = None
     system_running_on_pi: bool | None = None
-    system_shutdown_gpio: int | None = None
 
 
 def _is_finite_number(value: Any) -> bool:
@@ -288,7 +332,7 @@ def sanitize_overrides(raw: dict) -> dict:
         if spec is None:
             logger.warning("Ignoring config override for disallowed field %r.", field)
             continue
-        accepted, normalized = _validated_value(spec, value)
+        accepted, normalized = _validated_value(spec, _current_name(field, value))
         if not accepted:
             logger.warning(
                 "Ignoring config override %s=%r - not a valid %s%s.", field, value, spec.kind,
@@ -297,6 +341,12 @@ def sanitize_overrides(raw: dict) -> dict:
             continue
         sanitized[field] = normalized
     return sanitized
+
+
+def _current_name(field: str, value: Any) -> Any:
+    if field == "system_mode" and value == LEGACY_MANUAL_SYSTEM_MODE:
+        return "manual"
+    return value
 
 
 def _range_description(spec: FieldSpec) -> str:
@@ -417,6 +467,29 @@ def migrate_legacy_mode_override(overrides_path: Path, legacy_path: Path) -> Non
     fsync_directory(legacy_path.parent)
 
 
+def migrate_legacy_system_mode(overrides_path: Path) -> None:
+    """Rewrites a `system_mode` still holding Manual Mode's old name as "manual", exactly once.
+
+    sanitize_overrides() already reads the old name as "manual", but promote_overrides() bakes
+    the file's raw values into config.toml, which should only ever gain the current name. Only
+    the one legacy value is rewritten; any other value is left for validation to reject as before.
+    """
+    if not overrides_path.exists():
+        return
+    try:
+        with _locked_file(overrides_path):
+            existing = read_overrides_file(overrides_path)
+            if existing.get("system_mode") != LEGACY_MANUAL_SYSTEM_MODE:
+                return
+            _write_overrides_raw(overrides_path, existing | {"system_mode": "manual"})
+    except OSError as e:
+        logger.error("Could not migrate the legacy system_mode in %s: %s", overrides_path, e)
+        return
+    logger.info(
+        "Migrated system_mode %r to 'manual' in %s.", LEGACY_MANUAL_SYSTEM_MODE, overrides_path.name
+    )
+
+
 def _read_legacy_mode(legacy_path: Path) -> Any:
     try:
         with open(legacy_path, "rb") as f:
@@ -451,45 +524,6 @@ def apply_overrides(config: AppConfig, overrides: ConfigOverrides) -> None:
         value = None if value is CLEARED else _cast(override_field.name, value)
         for section_path, target_field in OVERRIDE_FIELD_TARGETS.get(override_field.name, ()):
             setattr(resolve_section(config, section_path), target_field, value)
-
-
-def parse_profiles(raw: Any) -> dict[str, ConfigOverrides]:
-    """Validates the `[profiles.*]` tables of config.toml and returns each as a ConfigOverrides.
-
-    A profile is a mapping of override field names to values, validated through the same
-    FIELD_SPECS as remote overrides - so only allow-listed fields can appear, never the
-    identity/secret fields of config.local.toml. Unlike remote input, config.toml is
-    repo-controlled, so anything invalid raises ValueError instead of being dropped. Every profile
-    is checked, not just the active one, so a typo in the other fails at the first boot too.
-    `device_mission_type` is rejected: the mission type selects the profile, so a profile
-    setting it would be circular.
-    """
-    if not isinstance(raw, dict):
-        raise ValueError(f"config.toml 'profiles' must be a table, got {type(raw).__name__}.")
-    known_profiles = FIELD_SPECS["device_mission_type"].choices
-    profiles: dict[str, ConfigOverrides] = {}
-    for name, fields_raw in raw.items():
-        if name not in known_profiles:
-            raise ValueError(f"Unknown profile [profiles.{name}] - expected one of {list(known_profiles)}.")
-        if not isinstance(fields_raw, dict):
-            raise ValueError(f"[profiles.{name}] must be a table.")
-        profiles[name] = ConfigOverrides(**_validated_profile_fields(name, fields_raw))
-    return profiles
-
-
-def _validated_profile_fields(name: str, fields_raw: dict) -> dict[str, Any]:
-    validated: dict[str, Any] = {}
-    for field, value in fields_raw.items():
-        spec = FIELD_SPECS.get(field)
-        if spec is None or field == "device_mission_type":
-            raise ValueError(f"[profiles.{name}] field {field!r} is not allowed in a profile.")
-        accepted, normalized = _validated_value(spec, value)
-        if not accepted:
-            raise ValueError(
-                f"[profiles.{name}] {field} is not a valid {spec.kind}{_range_description(spec)}."
-            )
-        validated[field] = normalized
-    return validated
 
 
 def _cast(field: str, value: Any) -> Any:
@@ -587,6 +621,30 @@ def _write_toml_document_atomically(path: Path, document: tomlkit.TOMLDocument) 
     fsync_directory(path.parent)
 
 
+def save_last_good_link_settings(config: AppConfig, config_path: Path) -> None:
+    """Keeps the link settings of a config that loaded, next to `config_path`, for
+    config.py::load_link_settings() to fall back on when config.toml itself can't be read.
+
+    Only `running_on_pi`, `[quectel_cm]` and `[link_watchdog]`, so no secret. Rewritten only when
+    they changed. A failure is only logged: it must never stop a boot.
+    """
+    path = config_path.parent / LAST_GOOD_LINK_SETTINGS_FILENAME
+    settings = {
+        "system": {"running_on_pi": config.system.running_on_pi},
+        "quectel_cm": asdict(config.quectel_cm),
+        "link_watchdog": asdict(config.link_watchdog),
+    }
+    try:
+        if path.exists() and json.loads(path.read_text()) == json.loads(json.dumps(settings)):
+            return
+    except (OSError, ValueError):
+        pass
+    try:
+        write_json_atomically(path, settings)
+    except OSError as e:
+        logger.warning("Could not save %s: %s", path.name, e)
+
+
 LOCAL_CONFIG_FILENAME = "config.local.toml"
 
 # Per-device identity/secrets a device operator sets by hand once at setup time - the local,
@@ -600,6 +658,7 @@ ALLOWED_LOCAL_FIELDS: dict[str, tuple[str, ...]] = {
     "selftest": ("results_url",),
     "gps_fix_test": ("status_url",),
     "latency_test": ("host",),
+    "clock": ("ntp_server",),
     "uploader": ("upload_dir",),
 }
 

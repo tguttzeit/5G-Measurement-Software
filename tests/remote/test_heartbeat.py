@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import io
 import json
 import logging
 import threading
@@ -19,8 +20,12 @@ from measurement_software.core.config import (
     RunStatusConfig,
     StorageConfig,
 )
-from measurement_software.core.config_sources import read_overrides_file, write_overrides_file
-from measurement_software.core.run_phase import RunPhase, RunPhaseState, WaitingLoop
+from measurement_software.core.config_sources import (
+    manual_next_boot_marker_present,
+    read_overrides_file,
+    write_overrides_file,
+)
+from measurement_software.core.run_phase import RunPhase, RunPhaseState, ManualModeLoop
 from measurement_software.core.uploader import Uploader
 from measurement_software.modems.modem import CellSample
 from measurement_software.remote.gps_fix_test import GpsFixTestRunner
@@ -60,7 +65,7 @@ class FakeConfigStatus:
         return self._payload
 
 BACKEND_URL = "https://backend.example.org"
-URL = "https://backend.example.org/heartbeat"
+URL = "https://backend.example.org/api/heartbeat"
 
 
 class FakeDiskUsage:
@@ -200,7 +205,7 @@ class TestHeartbeatSender:
 
     def test_posts_the_current_config_when_wired(self, backend, tmp_path):
         tracker = tracker_with(CellSample(rat="LTE", rsrp=-80.0, rsrq=-8.0, sinr=12.0))
-        config_status = FakeConfigStatus({"rsrp_threshold": -100.0, "idle_threshold_s": 200})
+        config_status = FakeConfigStatus({"collector_capture_gate": "distance", "idle_threshold_s": 200})
         sender = HeartbeatSender(
             HeartbeatConfig(enabled=True, interval_s=3600), make_backend_config(),
             tracker, storage_status_for(tmp_path), config_status,
@@ -210,7 +215,9 @@ class TestHeartbeatSender:
         wait_for_requests(backend, 1)
         sender.stop()
 
-        assert backend.payloads()[0]["current_config"] == {"rsrp_threshold": -100.0, "idle_threshold_s": 200}
+        assert backend.payloads()[0]["current_config"] == {
+            "collector_capture_gate": "distance", "idle_threshold_s": 200,
+        }
 
     def test_posts_device_id_in_payload(self, backend, tmp_path):
         tracker = tracker_with(CellSample(rat="LTE", rsrp=-80.0, rsrq=-8.0, sinr=12.0))
@@ -443,6 +450,48 @@ class TestDeliveryLogging:
         assert self.delivery_lines(caplog) == ["Heartbeat delivered again (HTTP 204) after 3 failed attempt(s)."]
 
 
+class TestRejectedHeartbeat:
+    """A heartbeat the backend rejects (e.g. HTTP 422 for a field it doesn't accept) is logged with
+    the backend's reason, so a device whose payload no longer fits the backend shows why."""
+
+    def reject_with(self, monkeypatch, body: bytes) -> None:
+        def urlopen(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, 422, "Unprocessable Entity", None, io.BytesIO(body))
+        monkeypatch.setattr("measurement_software.remote.heartbeat.urllib.request.urlopen", urlopen)
+
+    def send(self, tmp_path) -> bool:
+        sender = HeartbeatSender(
+            HeartbeatConfig(enabled=True), make_backend_config(), tracker_with(), storage_status_for(tmp_path),
+        )
+        return sender.send_once(tracker_with().status(), StorageStatus(pending_files=0, disk_free_bytes=1))
+
+    def test_logs_the_status_and_the_backends_reason(self, tmp_path, monkeypatch, caplog):
+        self.reject_with(monkeypatch, b'{"detail":[{"loc":["body","run_phase"],"msg":"Input should be ..."}]}')
+        caplog.set_level(logging.WARNING)
+
+        assert self.send(tmp_path) is False
+        assert "HTTP 422" in caplog.text
+        assert '"loc":["body","run_phase"]' in caplog.text
+
+    def test_a_long_reason_is_cut(self, tmp_path, monkeypatch, caplog):
+        self.reject_with(monkeypatch, b"x" * 5000)
+        caplog.set_level(logging.WARNING)
+
+        self.send(tmp_path)
+
+        assert "x" * 500 in caplog.text
+        assert "x" * 501 not in caplog.text
+
+    def test_an_unreadable_body_still_logs_the_status(self, tmp_path, monkeypatch, caplog):
+        def urlopen(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, 500, "Internal Server Error", None, None)
+        monkeypatch.setattr("measurement_software.remote.heartbeat.urllib.request.urlopen", urlopen)
+        caplog.set_level(logging.WARNING)
+
+        assert self.send(tmp_path) is False
+        assert "HTTP 500" in caplog.text
+
+
 class TestCriticalError:
     def test_payload_carries_the_critical_error_when_given(self, backend, tmp_path):
         sender = HeartbeatSender(
@@ -453,6 +502,21 @@ class TestCriticalError:
         sender.send_once(tracker_with().status(), StorageStatus(pending_files=0, disk_free_bytes=1))
 
         assert backend.payloads()[0]["critical_error"] == {"fingerprint": "ValueError@x:y", "action": "debug via SSH"}
+
+    def test_payload_carries_the_recovery_details_until_they_are_cleared(self, backend, tmp_path):
+        sender = HeartbeatSender(
+            HeartbeatConfig(enabled=True), make_backend_config(), tracker_with(), storage_status_for(tmp_path),
+        )
+        status, storage = tracker_with().status(), StorageStatus(pending_files=0, disk_free_bytes=1)
+        sender.set_recovery({"fingerprint": "ValueError@x:y", "same_error_count": 3})
+
+        sender.send_once(status, storage)
+        sender.set_recovery(None)
+        sender.send_once(status, storage)
+
+        first, second = backend.payloads()
+        assert first["recovery"] == {"fingerprint": "ValueError@x:y", "same_error_count": 3}
+        assert "recovery" not in second
 
     def test_payload_has_no_critical_error_by_default(self, backend, tmp_path):
         sender = HeartbeatSender(
@@ -626,6 +690,7 @@ class TestHeartbeatSenderAcks:
         )
         dispatcher = MagicMock()
         dispatcher.pending_acks.return_value = [{"id": 1, "command": "force-upload-now", "status": "success", "error": None}]
+        dispatcher.clear_acks.side_effect = lambda: dispatcher.pending_acks.return_value.clear()
         sender.set_remote_commands(dispatcher)
 
         sender.start()
@@ -681,44 +746,152 @@ class TestHeartbeatSenderAcks:
             {"id": 9, "command": "reboot-now", "status": "received", "error": None},
         ]
 
-    def test_send_pending_acks_now_sends_one_heartbeat_when_something_is_queued(self, backend, tmp_path):
-        sender = HeartbeatSender(
+class TestHeartbeatSenderStopDeliversRemainingAcks:
+    """An ack recorded after the last scheduled tick must still reach the backend before the
+    sender stops: otherwise the backend redelivers the command to the next process, which can
+    only answer `not_applicable` for a stop-measuring-now that actually worked."""
+
+    STOP_COMMAND = {"id": 42, "command": "stop-measuring-now"}
+
+    @pytest.fixture(autouse=True)
+    def no_retry_delay(self, monkeypatch) -> list[float]:
+        delays: list[float] = []
+        monkeypatch.setattr(
+            "measurement_software.remote.heartbeat.time",
+            types.SimpleNamespace(sleep=delays.append, monotonic=time.monotonic),
+        )
+        return delays
+
+    def make_sender(self, tmp_path) -> HeartbeatSender:
+        return HeartbeatSender(
             HeartbeatConfig(enabled=True, interval_s=3600), make_backend_config(),
             RunStatusTracker(RunStatusConfig()), storage_status_for(tmp_path),
         )
+
+    def make_dispatcher(self, tmp_path, collector=None) -> RemoteCommandDispatcher:
+        if collector is None:
+            collector = MagicMock(spec=Collector)
+            collector.is_collecting = True
+        return RemoteCommandDispatcher(
+            hmac_secret=SECRET, overrides_path=tmp_path / "config_overrides.toml",
+            uploader=MagicMock(spec=Uploader), collector=collector,
+        )
+
+    def respond_with_command_once(self, backend: FakeBackend, command: dict) -> None:
+        def respond(nonce: str) -> bytes:
+            if backend.request_count() == 1:
+                return json.dumps(signed_response(nonce=nonce, status="ok", commands=[command])).encode()
+            return json.dumps({"status": "ok"}).encode()
+        backend.respond_with = respond
+
+    @staticmethod
+    def acks_sent(backend: FakeBackend) -> list[dict]:
+        return [ack for payload in backend.payloads() for ack in payload.get("executed_commands", [])]
+
+    def test_stop_measuring_success_ack_is_sent_exactly_once_before_the_sender_stops(self, backend, tmp_path):
+        self.respond_with_command_once(backend, self.STOP_COMMAND)
+        sender = self.make_sender(tmp_path)
+        sender.set_remote_commands(self.make_dispatcher(tmp_path))
+
+        sender.start()
+        wait_for_requests(backend, 1)
+        sender.stop()
+
+        assert self.acks_sent(backend) == [
+            {"id": 42, "command": "stop-measuring-now", "status": "success", "error": None},
+        ]
+
+    def test_ack_recorded_after_the_collector_already_saw_the_stop_request_is_still_delivered(
+            self, backend, tmp_path):
+        """The handler sets the collector's stop flag before the dispatcher records the ack, so
+        the run can end while the ack does not exist yet."""
+        stop_requested = threading.Event()
+        collector = MagicMock(spec=Collector)
+        collector.is_collecting = True
+        collector.request_stop_measuring.side_effect = stop_requested.set
+        self.respond_with_command_once(backend, self.STOP_COMMAND)
+        sender = self.make_sender(tmp_path)
+        sender.set_remote_commands(self.make_dispatcher(tmp_path, collector))
+
+        sender.start()
+        assert stop_requested.wait(5.0)
+        sender.stop()
+
+        assert [ack["status"] for ack in self.acks_sent(backend)] == ["success"]
+
+    def test_a_failed_delivery_is_retried(self, backend, tmp_path):
+        self.respond_with_command_once(backend, self.STOP_COMMAND)
+        sender = self.make_sender(tmp_path)
+        sender.set_remote_commands(self.make_dispatcher(tmp_path))
+        sender.start()
+        wait_for_requests(backend, 1)
+        backend.fail_first = 2
+
+        sender.stop()
+
+        assert backend.request_count() == 3
+        assert backend.payloads()[2]["executed_commands"][0]["status"] == "success"
+
+    def test_an_unreachable_backend_gets_a_bounded_number_of_attempts(
+            self, backend, tmp_path, no_retry_delay, caplog):
+        self.respond_with_command_once(backend, self.STOP_COMMAND)
+        sender = self.make_sender(tmp_path)
+        sender.set_remote_commands(self.make_dispatcher(tmp_path))
+        sender.start()
+        wait_for_requests(backend, 1)
+        backend.fail_first = 1000
+
+        with caplog.at_level(logging.WARNING):
+            sender.stop()
+
+        assert backend.request_count() == 1 + 3
+        assert no_retry_delay == [2.0, 2.0]
+        assert "1 command ack(s) not delivered" in caplog.text
+
+    def test_commands_in_the_response_to_the_final_delivery_are_not_executed(self, backend, tmp_path):
+        """The sender is stopping: whatever the backend still queues is redelivered to the next
+        process rather than acted on by one that is shutting its collaborators down."""
+        uploader = MagicMock(spec=Uploader)
+        collector = MagicMock(spec=Collector)
+        collector.is_collecting = True
+        dispatcher = RemoteCommandDispatcher(
+            hmac_secret=SECRET, overrides_path=tmp_path / "config_overrides.toml",
+            uploader=uploader, collector=collector,
+        )
+        backend.respond_with = lambda nonce: json.dumps(signed_response(
+            nonce=nonce, status="ok",
+            commands=[self.STOP_COMMAND if backend.request_count() == 1 else {"id": 43, "command": "force-upload-now"}],
+        )).encode()
+        sender = self.make_sender(tmp_path)
+        sender.set_remote_commands(dispatcher)
+
+        sender.start()
+        wait_for_requests(backend, 1)
+        sender.stop()
+
+        assert backend.request_count() == 2
+        uploader.upload_pending_files.assert_not_called()
+        assert dispatcher.pending_acks() == []
+
+    def test_nothing_is_sent_on_stop_when_no_ack_is_pending(self, backend, tmp_path):
+        sender = self.make_sender(tmp_path)
+        sender.set_remote_commands(self.make_dispatcher(tmp_path))
+
+        sender.start()
+        wait_for_requests(backend, 1)
+        sender.stop()
+
+        assert backend.request_count() == 1
+
+    def test_stop_without_start_sends_nothing(self, backend, tmp_path):
+        sender = self.make_sender(tmp_path)
         dispatcher = MagicMock()
         dispatcher.pending_acks.return_value = [
             {"id": 1, "command": "stop-measuring-now", "status": "success", "error": None},
         ]
         sender.set_remote_commands(dispatcher)
 
-        sender.send_pending_acks_now()
-
-        assert backend.request_count() == 1
-        assert backend.payloads()[0]["executed_commands"] == [
-            {"id": 1, "command": "stop-measuring-now", "status": "success", "error": None},
-        ]
-
-    def test_send_pending_acks_now_is_a_no_op_when_nothing_is_queued(self, backend, tmp_path):
-        sender = HeartbeatSender(
-            HeartbeatConfig(enabled=True, interval_s=3600), make_backend_config(),
-            RunStatusTracker(RunStatusConfig()), storage_status_for(tmp_path),
-        )
-        dispatcher = MagicMock()
-        dispatcher.pending_acks.return_value = []
-        sender.set_remote_commands(dispatcher)
-
-        sender.send_pending_acks_now()
-
-        assert backend.request_count() == 0
-
-    def test_send_pending_acks_now_is_a_no_op_without_any_dispatcher_wired(self, backend, tmp_path):
-        sender = HeartbeatSender(
-            HeartbeatConfig(enabled=True, interval_s=3600), make_backend_config(),
-            RunStatusTracker(RunStatusConfig()), storage_status_for(tmp_path),
-        )
-
-        sender.send_pending_acks_now()
+        sender.stop()
 
         assert backend.request_count() == 0
 
@@ -734,8 +907,8 @@ def collector() -> MagicMock:
 
 
 @pytest.fixture
-def waiting_loop() -> MagicMock:
-    return MagicMock(spec=WaitingLoop)
+def manual_mode_loop() -> MagicMock:
+    return MagicMock(spec=ManualModeLoop)
 
 
 @pytest.fixture
@@ -756,17 +929,39 @@ def write_minimal_config_toml(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def run_phase() -> RunPhase:
+    phase = RunPhase()
+    phase.set(RunPhaseState.MANUAL_MODE_IDLE)
+    return phase
+
+
+@pytest.fixture
 def dispatcher(
-    tmp_path, uploader, collector, waiting_loop, gps_fix_test_runner,
+    tmp_path, uploader, collector, manual_mode_loop, gps_fix_test_runner, run_phase,
 ) -> RemoteCommandDispatcher:
     return RemoteCommandDispatcher(
         hmac_secret=SECRET,
         overrides_path=tmp_path / "config_overrides.toml",
         uploader=uploader,
         collector=collector,
-        waiting_loop=waiting_loop,
+        manual_mode_loop=manual_mode_loop,
         gps_fix_test_runner=gps_fix_test_runner,
         config_path=write_minimal_config_toml(tmp_path),
+        run_phase=run_phase,
+        manual_next_boot_path=tmp_path / "manual_next_boot.json",
+    )
+
+
+@pytest.fixture
+def auto_dispatcher(tmp_path, uploader, collector) -> RemoteCommandDispatcher:
+    """A dispatcher for a device in Auto Mode: no ManualModeLoop."""
+    return RemoteCommandDispatcher(
+        hmac_secret=SECRET,
+        overrides_path=tmp_path / "config_overrides.toml",
+        uploader=uploader,
+        collector=collector,
+        run_phase=run_phase,
+        manual_next_boot_path=tmp_path / "manual_next_boot.json",
     )
 
 
@@ -1011,29 +1206,122 @@ class TestOneShotCommands:
 
         collector.request_reboot.assert_called_once_with(1)
 
-    def test_dispatches_stop_measuring_now(self, dispatcher, collector, tmp_path):
+    def test_dispatches_stop_measuring_now(self, auto_dispatcher, collector, tmp_path):
+        auto_dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "stop-measuring-now"}]), NONCE)
+
+        collector.request_stop_measuring.assert_called_once()
+        assert manual_next_boot_marker_present(tmp_path / "manual_next_boot.json")
+
+    def test_stop_measuring_now_writes_no_persistent_override(self, auto_dispatcher, tmp_path):
+        auto_dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "stop-measuring-now"}]), NONCE)
+
+        assert read_overrides_file(tmp_path / "config_overrides.toml") == {}
+
+    def test_stop_measuring_now_in_persistent_manual_mode_leaves_no_marker(
+        self, tmp_path, uploader, collector, manual_mode_loop,
+    ):
+        dispatcher = RemoteCommandDispatcher(
+            hmac_secret=SECRET, overrides_path=tmp_path / "config_overrides.toml",
+            uploader=uploader, collector=collector, manual_mode_loop=manual_mode_loop,
+            manual_next_boot_path=tmp_path / "manual_next_boot.json",
+        )
+
         dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "stop-measuring-now"}]), NONCE)
 
         collector.request_stop_measuring.assert_called_once()
-        assert read_overrides_file(tmp_path / "config_overrides.toml") == {"system_mode": "waiting"}
+        assert not (tmp_path / "manual_next_boot.json").exists()
+        assert read_overrides_file(tmp_path / "config_overrides.toml") == {}
+
+    def test_stop_measuring_now_is_not_applicable_when_idle_and_not_measuring(
+        self, tmp_path, dispatcher, collector,
+    ):
+        collector.is_collecting = False
+        run_phase = RunPhase()
+        run_phase.set(RunPhaseState.MANUAL_MODE_IDLE)
+        dispatcher._run_phase = run_phase
+
+        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "stop-measuring-now"}]), NONCE)
+
+        collector.request_stop_measuring.assert_not_called()
+        assert dispatcher.pending_acks()[0]["status"] == "not_applicable"
+        assert not (tmp_path / "config_overrides.toml").exists()
+
+    def test_stop_measuring_now_aborts_a_manual_mode_start_still_waiting_for_a_fix(
+        self, tmp_path, uploader, collector, manual_mode_loop,
+    ):
+        collector.is_collecting = False
+        run_phase = RunPhase()
+        run_phase.set(RunPhaseState.WAITING_FOR_GPS_FIX)
+        dispatcher = RemoteCommandDispatcher(
+            hmac_secret=SECRET, overrides_path=tmp_path / "config_overrides.toml", uploader=uploader,
+            collector=collector, manual_mode_loop=manual_mode_loop, run_phase=run_phase,
+        )
+
+        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "stop-measuring-now"}]), NONCE)
+
+        collector.request_stop_measuring.assert_called_once()
+        assert dispatcher.pending_acks()[0]["status"] == "success"
+
+    @pytest.mark.parametrize(
+        "phase", [RunPhaseState.WAITING_FOR_GPS_FIX, RunPhaseState.WAITING_FOR_MOVEMENT],
+    )
+    def test_stop_measuring_now_is_not_applicable_in_auto_mode_before_measuring_starts(
+        self, tmp_path, uploader, collector, phase,
+    ):
+        collector.is_collecting = False
+        run_phase = RunPhase()
+        run_phase.set(phase)
+        dispatcher = RemoteCommandDispatcher(
+            hmac_secret=SECRET, overrides_path=tmp_path / "config_overrides.toml", uploader=uploader,
+            collector=collector, manual_mode_loop=None, run_phase=run_phase,
+        )
+
+        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "stop-measuring-now"}]), NONCE)
+
+        collector.request_stop_measuring.assert_not_called()
+        assert dispatcher.pending_acks()[0]["status"] == "not_applicable"
+        # An answer of not_applicable must not persist anything either.
+        assert not (tmp_path / "config_overrides.toml").exists()
 
     def test_dispatches_sim_reset_now(self, dispatcher, collector):
         dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "sim-reset-now"}]), NONCE)
 
         collector.request_sim_reset.assert_called_once()
 
-    def test_dispatches_mode_waiting_now(self, dispatcher, tmp_path):
+    def test_dispatches_mode_manual_now(self, dispatcher, tmp_path):
+        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "mode-manual-now"}]), NONCE)
+
+        assert read_overrides_file(tmp_path / "config_overrides.toml") == {"system_mode": "manual"}
+
+    def test_dispatches_the_legacy_mode_waiting_now_as_mode_manual_now(self, dispatcher, tmp_path):
         dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "mode-waiting-now"}]), NONCE)
 
-        assert read_overrides_file(tmp_path / "config_overrides.toml") == {"system_mode": "waiting"}
+        assert read_overrides_file(tmp_path / "config_overrides.toml") == {"system_mode": "manual"}
+        assert dispatcher.pending_acks() == [
+            {"id": 1, "command": "mode-waiting-now", "status": "success", "error": None},
+        ]
+
+    def test_ignores_an_unsigned_legacy_mode_waiting_now(self, dispatcher, tmp_path):
+        body = signed_response(commands=[{"id": 1, "command": "mode-waiting-now"}])
+        body["signature"] = "hmac-sha256:deadbeef"
+
+        dispatcher.handle_response(body, NONCE)
+
+        assert not (tmp_path / "config_overrides.toml").exists()
+        assert dispatcher.pending_acks() == []
+
+    def test_persists_a_legacy_waiting_system_mode_override_as_manual(self, dispatcher, tmp_path):
+        dispatcher.handle_response(signed_response(config_overrides={"system_mode": "waiting"}), NONCE)
+
+        assert read_overrides_file(tmp_path / "config_overrides.toml") == {"system_mode": "manual"}
 
     def test_mode_commands_keep_other_overrides_and_write_no_legacy_file(self, dispatcher, tmp_path):
         write_overrides_file(tmp_path / "config_overrides.toml", {"idle_threshold_s": 300})
 
-        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "mode-waiting-now"}]), NONCE)
+        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "mode-manual-now"}]), NONCE)
 
         assert read_overrides_file(tmp_path / "config_overrides.toml") == {
-            "idle_threshold_s": 300, "system_mode": "waiting",
+            "idle_threshold_s": 300, "system_mode": "manual",
         }
         assert not (tmp_path / "mode_override.toml").exists()
 
@@ -1043,20 +1331,20 @@ class TestOneShotCommands:
         assert read_overrides_file(tmp_path / "config_overrides.toml") == {"system_mode": "auto"}
 
     def test_a_later_mode_command_overwrites_an_earlier_one(self, dispatcher, tmp_path):
-        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "mode-waiting-now"}]), NONCE)
+        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "mode-manual-now"}]), NONCE)
         dispatcher.handle_response(signed_response(commands=[{"id": 2, "command": "mode-auto-now"}]), NONCE)
 
         assert read_overrides_file(tmp_path / "config_overrides.toml") == {"system_mode": "auto"}
 
-    def test_dispatches_start_measuring_now_to_the_waiting_loop(self, dispatcher, waiting_loop):
+    def test_dispatches_start_measuring_now_to_the_manual_mode_loop(self, dispatcher, manual_mode_loop):
         dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "start-measuring-now"}]), NONCE)
 
-        waiting_loop.request_start_measuring.assert_called_once()
+        manual_mode_loop.request_start_measuring.assert_called_once()
 
-    def test_dispatches_run_selftest_now_to_the_waiting_loop(self, dispatcher, waiting_loop):
+    def test_dispatches_run_selftest_now_to_the_manual_mode_loop(self, dispatcher, manual_mode_loop):
         dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "run-selftest-now"}]), NONCE)
 
-        waiting_loop.request_run_selftest.assert_called_once()
+        manual_mode_loop.request_run_selftest.assert_called_once()
 
     def test_dispatches_run_gps_fix_test_now_to_the_runner(self, dispatcher, gps_fix_test_runner):
         dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "run-gps-fix-test-now"}]), NONCE)
@@ -1068,75 +1356,90 @@ class TestOneShotCommands:
 
         gps_fix_test_runner.stop.assert_called_once()
 
-    def test_ignores_run_gps_fix_test_now_when_not_in_waiting_mode(
-        self, tmp_path, uploader, collector, caplog,
+    @pytest.mark.parametrize("command, target, method", [
+        ("start-measuring-now", "manual_mode_loop", "request_start_measuring"),
+        ("run-selftest-now", "manual_mode_loop", "request_run_selftest"),
+        ("run-gps-fix-test-now", "gps_fix_test_runner", "start"),
+        ("stop-gps-fix-test-now", "gps_fix_test_runner", "stop"),
+    ])
+    def test_manual_commands_apply_in_the_recovery_state(
+        self, dispatcher, run_phase, manual_mode_loop, gps_fix_test_runner, command, target, method,
+    ):
+        run_phase.set(RunPhaseState.RECOVERY_IDLE)
+        collaborators = {"manual_mode_loop": manual_mode_loop, "gps_fix_test_runner": gps_fix_test_runner}
+
+        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": command}]), NONCE)
+
+        getattr(collaborators[target], method).assert_called_once()
+        assert dispatcher.pending_acks()[0]["status"] == "success"
+
+    @pytest.mark.parametrize("command", [
+        "start-measuring-now", "run-selftest-now", "run-gps-fix-test-now", "stop-gps-fix-test-now",
+    ])
+    @pytest.mark.parametrize("phase", [
+        RunPhaseState.ACTIVE_MEASURING, RunPhaseState.FINALIZING, RunPhaseState.WAITING_FOR_MOVEMENT,
+        RunPhaseState.RECOVERING_PENDING_DATA,
+    ])
+    def test_manual_commands_are_not_applicable_outside_manual_idle(
+        self, dispatcher, run_phase, manual_mode_loop, gps_fix_test_runner, command, phase,
+    ):
+        run_phase.set(phase)
+
+        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": command}]), NONCE)
+
+        ack = dispatcher.pending_acks()[0]
+        assert ack["status"] == "not_applicable"
+        assert phase.value in ack["error"]
+        manual_mode_loop.request_start_measuring.assert_not_called()
+        manual_mode_loop.request_run_selftest.assert_not_called()
+        gps_fix_test_runner.start.assert_not_called()
+        gps_fix_test_runner.stop.assert_not_called()
+
+    def test_not_applicable_command_is_not_marked_executed_so_it_applies_once_idle(
+        self, dispatcher, run_phase, manual_mode_loop,
+    ):
+        body = signed_response(commands=[{"id": 1, "command": "start-measuring-now"}])
+        run_phase.set(RunPhaseState.ACTIVE_MEASURING)
+        dispatcher.handle_response(body, NONCE)
+
+        run_phase.set(RunPhaseState.MANUAL_MODE_IDLE)
+        dispatcher.handle_response(body, NONCE)
+
+        manual_mode_loop.request_start_measuring.assert_called_once()
+
+    @pytest.mark.parametrize("command", [
+        "start-measuring-now", "run-selftest-now", "run-gps-fix-test-now", "stop-gps-fix-test-now",
+    ])
+    def test_manual_commands_are_not_applicable_without_a_run_phase(
+        self, tmp_path, uploader, collector, manual_mode_loop, gps_fix_test_runner, command,
     ):
         dispatcher = RemoteCommandDispatcher(
-            hmac_secret=SECRET,
-            overrides_path=tmp_path / "config_overrides.toml",
-            uploader=uploader,
-            collector=collector,
-            waiting_loop=None,
-            gps_fix_test_runner=None,
+            hmac_secret=SECRET, overrides_path=tmp_path / "config_overrides.toml",
+            uploader=uploader, collector=collector,
+            manual_mode_loop=manual_mode_loop, gps_fix_test_runner=gps_fix_test_runner,
         )
 
-        dispatcher.handle_response(
-            signed_response(commands=[{"id": 1, "command": "run-gps-fix-test-now"}]), NONCE
-        )
+        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": command}]), NONCE)
 
         assert dispatcher.pending_acks()[0]["status"] == "not_applicable"
+        manual_mode_loop.request_start_measuring.assert_not_called()
+        gps_fix_test_runner.start.assert_not_called()
 
-    def test_ignores_stop_gps_fix_test_now_when_not_in_waiting_mode(
-        self, tmp_path, uploader, collector, caplog,
+    @pytest.mark.parametrize("command", ["run-gps-fix-test-now", "stop-gps-fix-test-now"])
+    def test_gps_fix_test_is_not_applicable_with_gps_disabled(
+        self, tmp_path, uploader, collector, manual_mode_loop, run_phase, command,
     ):
         dispatcher = RemoteCommandDispatcher(
-            hmac_secret=SECRET,
-            overrides_path=tmp_path / "config_overrides.toml",
-            uploader=uploader,
-            collector=collector,
-            waiting_loop=None,
-            gps_fix_test_runner=None,
+            hmac_secret=SECRET, overrides_path=tmp_path / "config_overrides.toml",
+            uploader=uploader, collector=collector,
+            manual_mode_loop=manual_mode_loop, gps_fix_test_runner=None, run_phase=run_phase,
         )
 
-        dispatcher.handle_response(
-            signed_response(commands=[{"id": 1, "command": "stop-gps-fix-test-now"}]), NONCE
-        )
+        dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": command}]), NONCE)
 
-        assert dispatcher.pending_acks()[0]["status"] == "not_applicable"
-
-    def test_ignores_run_selftest_now_when_not_in_waiting_mode(
-        self, tmp_path, uploader, collector, caplog,
-    ):
-        dispatcher = RemoteCommandDispatcher(
-            hmac_secret=SECRET,
-            overrides_path=tmp_path / "config_overrides.toml",
-            uploader=uploader,
-            collector=collector,
-            waiting_loop=None,
-        )
-
-        dispatcher.handle_response(
-            signed_response(commands=[{"id": 1, "command": "run-selftest-now"}]), NONCE
-        )
-
-        assert dispatcher.pending_acks()[0]["status"] == "not_applicable"
-
-    def test_ignores_start_measuring_now_when_not_in_waiting_mode(
-        self, tmp_path, uploader, collector, caplog,
-    ):
-        dispatcher = RemoteCommandDispatcher(
-            hmac_secret=SECRET,
-            overrides_path=tmp_path / "config_overrides.toml",
-            uploader=uploader,
-            collector=collector,
-            waiting_loop=None,
-        )
-
-        dispatcher.handle_response(
-            signed_response(commands=[{"id": 1, "command": "start-measuring-now"}]), NONCE
-        )
-
-        assert dispatcher.pending_acks()[0]["status"] == "not_applicable"
+        ack = dispatcher.pending_acks()[0]
+        assert ack["status"] == "not_applicable"
+        assert ack["error"] == "GPS disabled"
 
     def test_dedupes_a_redelivered_command_id(self, dispatcher, uploader):
         body = signed_response(commands=[{"id": 1, "command": "force-upload-now"}])
@@ -1303,7 +1606,7 @@ class TestCommandAcks:
         assert dispatcher.pending_acks() == []
 
     def test_reboot_now_queues_no_generic_success_ack(self, dispatcher, collector):
-        """reboot-now's "success" only comes from seed_reboot_success_ack() once the next boot
+        """reboot-now's "success" only comes from seed_success_ack() once the next boot
         proves the reboot actually happened - not from here, before it's even been attempted."""
         dispatcher.handle_response(signed_response(commands=[{"id": 1, "command": "reboot-now"}]), NONCE)
 
@@ -1316,17 +1619,17 @@ class TestCommandAcks:
 
         assert dispatcher.pending_acks() == []
 
-    def test_seed_reboot_success_ack_queues_a_success_ack_for_reboot_now(self, dispatcher):
-        dispatcher.seed_reboot_success_ack(52)
+    def test_seed_success_ack_queues_a_success_ack_for_reboot_now(self, dispatcher):
+        dispatcher.seed_success_ack(52, "reboot-now")
 
         assert dispatcher.pending_acks() == [
             {"id": 52, "command": "reboot-now", "status": "success", "error": None},
         ]
 
-    def test_seed_reboot_success_ack_marks_the_id_executed_so_a_redelivery_does_not_reboot_again(
+    def test_seed_success_ack_marks_the_id_executed_so_a_redelivery_does_not_reboot_again(
         self, dispatcher, collector,
     ):
-        dispatcher.seed_reboot_success_ack(52)
+        dispatcher.seed_success_ack(52, "reboot-now")
         dispatcher.clear_acks()
 
         # The backend may not have cleared its queue yet by the time this (new, post-reboot)

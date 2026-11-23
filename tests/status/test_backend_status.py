@@ -340,12 +340,12 @@ def make_app_config(**overrides) -> AppConfig:
         quectel_cm=QuectelCmConfig(),
         run_status=RunStatusConfig(),
         backend=BackendConfig(),
-        heartbeat=HeartbeatConfig(),
+        heartbeat=HeartbeatConfig(enabled=False),
         selftest=SelftestConfig(),
         gps_fix_test=GpsFixTestConfig(),
         storage=StorageConfig(),
-        display=DisplayConfig(),
-        latency_test=LatencyTestConfig(),
+        display=DisplayConfig(enabled=False),
+        latency_test=LatencyTestConfig(enabled=False),
         uploader=UploaderConfig(upload_dir="/data/uploads"),
         logging=LoggingConfig(),
         system=SystemConfig(),
@@ -380,7 +380,7 @@ class TestConfigStatusReporterAsPayload:
                 type="quectel", port="/dev/ttyUSB3", baud_rate=9600, timeout=1.0,
                 retries=5, retry_delay_s=1.5,
             ),
-            system=SystemConfig(running_on_pi=False, shutdown_gpio=22, mode="waiting"),
+            system=SystemConfig(running_on_pi=False, mode="manual"),
         )
 
         payload = ConfigStatusReporter(config).as_payload()
@@ -408,7 +408,7 @@ class TestConfigStatusReporterAsPayload:
             "movement_gate_home_longitude": 11.5,
             "movement_gate_home_departure_threshold": 150.0,
             "latency_test_enabled": True,
-            "system_mode": "waiting",
+            "system_mode": "manual",
             "device_mission_type": "drone",
             "display_enabled": True,
             "display_refresh_interval_s": 4.0,
@@ -418,10 +418,9 @@ class TestConfigStatusReporterAsPayload:
             "gnss_receiver_retries": 5,
             "gnss_receiver_retry_delay_s": 1.5,
             "system_running_on_pi": False,
-            "system_shutdown_gpio": 22,
         }
 
-    @pytest.mark.parametrize("mode", ["auto", "waiting"])
+    @pytest.mark.parametrize("mode", ["auto", "manual"])
     def test_reports_the_running_mode_as_system_mode(self, mode):
         config = make_app_config(system=SystemConfig(mode=mode))
 

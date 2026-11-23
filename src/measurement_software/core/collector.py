@@ -7,7 +7,7 @@ from typing import Any, Callable, Iterator
 from measurement_software.core.capture_gate import create_capture_gate
 from measurement_software.core.config import CollectorConfig, DeviceConfig
 from measurement_software.core.datapoint import Datapoint
-from measurement_software.remote.heartbeat import HeartbeatSender
+from measurement_software.core.modem_access import ModemAccess
 from measurement_software.core.movement_tracker import MovementTracker
 from measurement_software.core.run_log import RunLog
 from measurement_software.core.system import KeepModemAliveSender
@@ -15,6 +15,9 @@ from measurement_software.core.util import haversine_distance_m, new_run_id, utc
 from measurement_software.gnss.gnss_receiver import GNSSFix, GNSSReceiver, Position
 from measurement_software.modems.modem import Modem, ModemConnectionError
 from measurement_software.status.backend_status import GpsFixStatusTracker, RunStatusTracker
+
+
+_NO_FIX_PAUSE_S = 0.01
 
 
 class RemoteShutdownRequested(Exception):
@@ -46,10 +49,7 @@ class StopMeasuringRequested(Exception):
 
     Caught inside collect() itself, unlike RemoteShutdownRequested/RemoteRebootRequested - the
     run just ends early as if it had gone idle, taking the usual finalize/upload path rather
-    than the emergency one those two take. Catching it also triggers one immediate extra
-    heartbeat (see collect()) to flush the command's own queued success ack before the
-    background heartbeat thread stops - confirmed live (issue #50 field test) that the run
-    otherwise ends, and the process can exit, well before that ack's next scheduled tick.
+    than the emergency one those two take.
     """
 
 
@@ -57,14 +57,15 @@ class Collector:
     """Runs a GPS-triggered measurement session, sampling the modem per the configured capture gate."""
 
     def __init__(self, modem: Modem, gnss_receiver: GNSSReceiver, config: CollectorConfig,
-                 run_status: RunStatusTracker, heartbeat: HeartbeatSender, run_log: RunLog[Datapoint],
+                 run_status: RunStatusTracker, run_log: RunLog[Datapoint],
                  device: DeviceConfig, gps_fix_status: GpsFixStatusTracker | None = None,
-                 run_id: str | None = None, on_sim_reset: Callable[[], None] | None = None):
+                 run_id: str | None = None, on_sim_reset: Callable[[], None] | None = None,
+                 idle_end_enabled: bool = True, modem_access: ModemAccess | None = None):
         self._logger = logging.getLogger(__name__)
         self._modem = modem
+        self._modem_access = modem_access or ModemAccess(modem)
         self._gnss_receiver = gnss_receiver
         self._run_status = run_status
-        self._heartbeat = heartbeat
         self._run_log = run_log
         self._device_id = device.device_id
         self._mission_type = device.mission_type
@@ -73,9 +74,8 @@ class Collector:
         self._on_sim_reset = on_sim_reset
 
         self._position_threshold = config.position_threshold
+        self._idle_end_enabled = idle_end_enabled
         self._max_idle_time = config.max_idle_time
-        self._max_wait_for_first_fix = config.max_wait_for_first_fix
-        self._wait_log_interval = config.wait_log_interval
         self._gps_enabled = config.gps_enabled
         self._gps_disabled_poll_interval_s = config.gps_disabled_poll_interval_s
         self._capture_gate = create_capture_gate(config)
@@ -159,7 +159,7 @@ class Collector:
         iteration.
 
         Before collect() opens the modem, nothing else ever touches it - movement_gate's and
-        WaitingLoop's own waits never go near self._modem - so acting immediately here is safe.
+        ManualModeLoop's own waits never go near self._modem - so acting immediately here is safe.
         Once collect() is running, the two phases would otherwise race on the same connection
         (the modem's serial connection isn't thread-safe), so it's deferred to request_shutdown()
         's same flag/check pattern instead.
@@ -176,24 +176,24 @@ class Collector:
             self._modem.open()
 
     def request_radio_reset(self) -> bool:
-        """Asks the collection thread to reset the modem's radio on its next loop iteration.
+        """Resets the modem's radio: on the collection thread's next loop iteration while
+        collecting, otherwise right away from this thread through ModemAccess.
 
-        Returns False, doing nothing, when no run is collecting: the modem's serial port is only
-        open during collect(), and opening it from another thread could race collect() opening
-        it (the connection isn't thread-safe).
+        Returns False, doing nothing, when the modem can't be used right now (see
+        ModemAccess.reset_radio_if_idle()).
         """
         with self._remote_lock:
-            if not self._collecting:
-                return False
-            self._radio_reset_requested = True
-            return True
+            if self._collecting:
+                self._radio_reset_requested = True
+                return True
+        return self._modem_access.reset_radio_if_idle()
 
     def check_remote_shutdown_or_reboot(self) -> None:
         """Raises if a shutdown or reboot was requested - shutdown beats reboot if somehow both are.
 
         Unlike _check_remote_commands(), this concerns the whole device rather than an active
         measuring session, so it's safe (and meant) to be called from any phase - the
-        pre-measurement GPS-fix/movement wait and Waiting Mode's idle wait, not just collect()'s
+        pre-measurement GPS-fix/movement wait and Manual Mode's idle wait, not just collect()'s
         own loop - so shutdown-now/reboot-now take effect immediately regardless of what the
         device happens to be doing when they arrive.
         """
@@ -211,6 +211,22 @@ class Collector:
             self._logger.critical("Remote reboot-now command received - ending collection.")
             raise RemoteRebootRequested(reboot_command_id)
 
+    def check_remote_commands_before_measuring(self) -> None:
+        """Raises if a shutdown, reboot or stop-measuring was requested; meant for the wait for the
+        first GPS fix, before any run exists.
+
+        Like check_remote_shutdown_or_reboot(), but also consumes a pending stop-measuring-now:
+        the wait it interrupts ends with StopMeasuringRequested and the request is spent, so it
+        cannot also end the next run.
+        """
+        self.check_remote_shutdown_or_reboot()
+        with self._remote_lock:
+            stop_measuring_requested = self._stop_measuring_requested
+            self._stop_measuring_requested = False
+        if stop_measuring_requested:
+            self._logger.warning("Remote stop-measuring-now command received - ending the wait.")
+            raise StopMeasuringRequested()
+
     def _check_remote_commands(self) -> None:
         """Applies a pending remote sim-reset in place; raises if a shutdown, reboot, or
         stop-measuring was requested.
@@ -220,6 +236,7 @@ class Collector:
         """
         with self._remote_lock:
             stop_measuring_requested = self._stop_measuring_requested
+            self._stop_measuring_requested = False
             sim_reset_requested = self._sim_reset_requested
             self._sim_reset_requested = False
             radio_reset_requested = self._radio_reset_requested
@@ -242,18 +259,23 @@ class Collector:
             raise StopMeasuringRequested()
 
     def collect(self) -> Path:
-        """Waits for a GPS fix, then records datapoints until movement stops for too long.
+        """Records datapoints, starting with the first fix the receiver reports, until the run ends.
+
+        The wait for a first fix happens before this, in its own phase (see FirstFixWaiter), so
+        the fix this starts from is read fresh rather than carried over from that wait.
 
         Returns the run log written, which holds everything captured up to the moment the
         session ended - including a session ended by the power being cut.
         """
-        self._modem.open()
+        with self._modem_access.claim():
+            return self._collect()
+
+    def _collect(self) -> Path:
         self._gnss_receiver.open()
         self._run_log.open()
         time.sleep(1)
 
         self._keep_modem_alive.start()
-        self._heartbeat.start()
         self._logger.info("Starting data collection...")
         if not self._gps_enabled:
             self._logger.warning(
@@ -264,75 +286,66 @@ class Collector:
         with self._remote_lock:
             self._collecting = True
         try:
-            first_fix = self._wait_for_first_fix()
-            if first_fix is not None:
-                self._record_until_idle(first_fix)
+            self._record_until_idle()
         except StopMeasuringRequested:
-            self._heartbeat.send_pending_acks_now()
+            pass
         finally:
             with self._remote_lock:
                 self._collecting = False
-            self._heartbeat.stop()
             self._keep_modem_alive.stop()
             self._run_log.close()
             self._gnss_receiver.close()
-            self._modem.close()
             self._logger.info("Finished data collection")
 
         return self._run_log.path
 
-    def _record_until_idle(self, first_fix: GNSSFix) -> None:
-        """Records a datapoint for every qualifying movement until the device sits still for too long."""
+    def _record_until_idle(self) -> None:
+        """Records a datapoint for every qualifying movement until the device sits still for too long.
+
+        The idle end is checked after every read, fix or not: without a fix there is no evidence
+        of movement, so the idle clock keeps running. It only starts once a first fix exists - the
+        wait for that one is a phase of its own.
+        """
         self._last_pos = None
         self._last_movement_time = None
+        first_fix_seen = False
 
-        for fix in self._iter_fixes(first_fix):
-            self._check_remote_commands()
+        for fix in self._iter_reads():
+            if fix is not None:
+                first_fix_seen = True
+                self._track_genuine_movement(fix)
+                if self._should_capture(fix):
+                    self._run_log.append(self._capture_datapoints(fix))
 
-            self._track_genuine_movement(fix)
-
-            if self._should_capture(fix):
-                self._run_log.append(self._capture_datapoints(fix))
-
-            if self._has_been_idle_too_long():
+            if first_fix_seen and self._has_been_idle_too_long():
                 break
 
-    def _wait_for_first_fix(self) -> GNSSFix | None:
-        """Blocks until the receiver reports a fix, or returns None if none arrives in time."""
-        start = time.time()
-        last_wait_log = 0.0
+    def _iter_reads(self) -> Iterator[GNSSFix | None]:
+        """Yields the result of every receiver read - None when no fix arrived - forever, applying
+        pending remote commands after each read and before the result is used.
 
-        while True:
-            self._check_remote_commands()
-
-            elapsed = time.time() - start
-            if elapsed > self._max_wait_for_first_fix:
-                self._logger.info("No GPS fix in specified interval of %s s. - Aborting.",
-                                  self._max_wait_for_first_fix)
-                return None
-
-            now = time.time()
-            if (now - last_wait_log) >= self._wait_log_interval:
-                self._logger.info("Waiting for first GPS fix… (for %s s by now)", int(elapsed))
-                last_wait_log = now
-
-            fix = self._read_fix()
-            if fix is not None:
-                return fix
-
-    def _iter_fixes(self, first_fix: GNSSFix) -> Iterator[GNSSFix]:
-        """Yields the first fix, then every subsequent non-None fix from the receiver, forever.
-
+        Yielding None lets the caller keep its per-iteration checks running while no fix is arriving.
         With GPS disabled, the receiver has no natural read pace of its own (unlike blocking on
         real serial I/O), so this paces reads itself at gps_disabled_poll_interval_s.
         """
-        yield first_fix
         while True:
+            read_started = time.time()
+            fix = self._read_fix()
+            self._check_remote_commands()
+            if fix is None:
+                self._wait_if_read_returned_immediately(read_started)
+            yield fix
             if not self._gps_enabled:
                 time.sleep(self._gps_disabled_poll_interval_s)
-            fix = self._read_fix()
-            if fix is not None:
-                yield fix
+
+    def _wait_if_read_returned_immediately(self, read_started: float) -> None:
+        """Keeps a receiver that answers None without blocking from turning the loop into a busy loop.
+
+        A serial read normally blocks up to its timeout, so a read that took longer than the pause
+        gets none added; the pause is short enough to keep up with a receiver streaming NMEA lines.
+        """
+        if time.time() - read_started < _NO_FIX_PAUSE_S:
+            time.sleep(_NO_FIX_PAUSE_S)
 
     def _read_fix(self) -> GNSSFix | None:
         """Reads one fix, recording it into the shared gps_fix_status tracker if one is wired.
@@ -366,8 +379,8 @@ class Collector:
     def _track_genuine_movement(self, fix: GNSSFix) -> None:
         """Updates the idle clock and `MovementTracker` for real vehicle movement on this fix.
 
-        Runs regardless of which capture gate is configured: the idle
-        clock that ends a run has to keep reflecting whether the vehicle has actually moved even
+        Runs regardless of which capture gate is configured: the idle clock that ends a run has
+        to keep reflecting whether the vehicle has actually moved even
         under `capture_gate = "time"`, where capture decisions no longer do — otherwise a parked
         vehicle sampled on a fixed cadence would never go idle and the run would never end on its
         own. With GPS disabled there's no real position to detect movement from, so every paced
@@ -375,6 +388,7 @@ class Collector:
         """
         if not self._gps_enabled:
             self._movement.record_movement(fix)
+            self._last_movement_time = None
             return
         if self._has_moved_enough(fix):
             self._movement.record_movement(fix)
@@ -464,9 +478,11 @@ class Collector:
     def _has_been_idle_too_long(self) -> bool:
         """Returns True once the device has gone without movement for longer than max_idle_time.
 
-        A max_idle_time of 0 disables the idle end altogether.
+        Never True in Manual Mode, where the operator starts and ends the run by command and
+        the device may sit still on purpose (a hovering drone). A max_idle_time of 0 also
+        disables the idle end.
         """
-        if self._max_idle_time == 0:
+        if not self._idle_end_enabled or self._max_idle_time == 0:
             return False
 
         if self._last_movement_time is None:

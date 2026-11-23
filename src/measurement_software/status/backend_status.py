@@ -241,8 +241,8 @@ class StorageStatus:
 class StorageStatusReporter:
     """Reads the current upload-backlog size and free disk space, warning loudly if space is low.
 
-    Not a cap or eviction policy - free space is only ever reported
-    and warned about here, never acted on.
+    Not a cap or eviction policy - free space is only ever reported and warned about here, never
+    acted on.
     """
 
     def __init__(self, upload_dir: Path, config: StorageConfig):

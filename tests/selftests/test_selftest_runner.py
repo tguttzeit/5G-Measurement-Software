@@ -12,7 +12,7 @@ class FakeReporter(SelftestResultsReporter):
 
 
 def fake_run_check_factory(results: dict[str, CheckResult]):
-    def fake_run_check(name, config, *, confirm_side_effects):
+    def fake_run_check(name, config):
         return results[name]
     return fake_run_check
 
@@ -28,7 +28,7 @@ class TestRunChecks:
         )
         reporter = FakeReporter()
 
-        results = run_checks(config=None, names=["modem"], confirm_side_effects=False, reporter=reporter)
+        results = run_checks(config=None, names=["modem"], reporter=reporter)
 
         assert results == [result]
         assert reporter.submissions == [
@@ -43,7 +43,7 @@ class TestRunChecks:
         )
         reporter = FakeReporter()
 
-        run_checks(config=None, names=["display"], confirm_side_effects=False, reporter=reporter)
+        run_checks(config=None, names=["display"], reporter=reporter)
 
         assert reporter.submissions == []
 
@@ -58,6 +58,6 @@ class TestRunChecks:
         )
         reporter = FakeReporter()
 
-        results = run_checks(config=None, names=["modem", "display"], confirm_side_effects=False, reporter=reporter)
+        results = run_checks(config=None, names=["modem", "display"], reporter=reporter)
 
         assert results == [modem_result, display_result]

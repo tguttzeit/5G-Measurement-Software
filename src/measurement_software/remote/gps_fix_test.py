@@ -22,9 +22,9 @@ class GpsFixTestRunner:
     """Live GPS-fix-finding diagnostic: streams satellite count while someone repositions the
     antenna, so a good mounting position can be found without waiting for a full measurement run.
 
-    Only meaningful in Waiting Mode (see RemoteCommandDispatcher) - opens
-    its own `GNSSReceiver` on a background thread (nothing else holds one open in Waiting Mode,
-    same reasoning as the self-test's own GNSS use) and repeatedly calls `read_fix()`/
+    Only meaningful while idle in Manual Mode (see RemoteCommandDispatcher, which only dispatches
+    it there, and only with GNSS hardware) - opens its own `GNSSReceiver` on a background thread
+    (nothing else holds one open while idle, same reasoning as the self-test's own GNSS use) and repeatedly calls `read_fix()`/
     `read_satellites_in_view()`, posting a small status payload to `config.status_url` roughly
     every `report_interval_s`. Reports satellites-in-view (not just a fix's own satellite count)
     so the count moves while someone is still searching for a fix, not only after one exists.
@@ -38,9 +38,9 @@ class GpsFixTestRunner:
     it finds into the shared `gps_fix_status` tracker (the same one
     `MovementGate`/`Collector` feed - see `status/backend_status.py`), so the OLED screen and
     heartbeat reflect what this diagnostic sees rather than sitting at "no fix" the whole time
-    it's running - `_wait_for_remote_command()` never touches `MovementGate` in Waiting Mode
-    (movement isn't observed there at all), so without this, this
-    diagnostic would be the only thing on the device that actually knows a fix (or fault) exists.
+    it's running - `_run_manual_mode()` never touches `MovementGate` in Manual Mode
+    (movement isn't observed there at all), so without this, this diagnostic would be the only
+    thing on the device that actually knows a fix (or fault) exists.
     """
 
     def __init__(

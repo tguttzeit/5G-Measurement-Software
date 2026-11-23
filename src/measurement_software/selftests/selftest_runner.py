@@ -5,7 +5,7 @@ from measurement_software.selftests.selftest_results import CheckResult
 
 
 def run_checks(
-    config: AppConfig, names: list[str], *, confirm_side_effects: bool, reporter: SelftestResultsReporter,
+    config: AppConfig, names: list[str], *, reporter: SelftestResultsReporter,
 ) -> list[CheckResult]:
     """Runs each named check in order, reporting backend-supported ones once they finish.
 
@@ -16,7 +16,7 @@ def run_checks(
     """
     results = []
     for name in names:
-        result = run_check(name, config, confirm_side_effects=confirm_side_effects)
+        result = run_check(name, config)
 
         if name in BACKEND_TEST_TYPES:
             reporter.submit(

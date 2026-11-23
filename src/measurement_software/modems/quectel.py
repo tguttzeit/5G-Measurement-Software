@@ -232,14 +232,17 @@ class Quectel(Modem):
         Real modules report each cell as one line starting with the report type and connection
         state ahead of the RAT itself, e.g. `+QENG: "servingcell","NOCONN","LTE",...` - those two
         leading fields are dropped here so the RAT lines up at parts[0] the same way for every
-        RAT-specific parser below. A bare `"servingcell"` line with nothing else on it (seen on
-        some firmware as a header echo with no data following) has nothing left to parse and is
-        skipped.
+        RAT-specific parser below. On an EN-DC cell the state comes on a line of its own
+        (`+QENG: "servingcell","NOCONN"`), followed by one line per RAT without that prefix -
+        a state line like that, or a bare `"servingcell"` line, has nothing left to parse and is
+        skipped. Each raw line is logged at debug level, so a format question can be answered
+        from the log.
         """
         results: list[CellSample] = []
         for line in response.splitlines():
             if not line.startswith("+QENG:"):
                 continue
+            self._logger.debug("QENG line: %s", line.strip())
 
             payload = line[len("+QENG:") :].strip()
             parts = [Quectel._clean(p) for p in payload.split(",")]
@@ -247,17 +250,15 @@ class Quectel(Modem):
                 if len(parts) < 3:
                     continue
                 parts = parts[2:]
-            rat_token = parts[0]
-
-            if rat_token == "LTE":
-                results.append(Quectel._parse_lte(parts))
-            elif rat_token in ("NR5G-SA", "NR5G-NSA"):
-                results.append(Quectel._parse_nr5g(parts, rat_token))
-            else:
+            parser = _QENG_PARSERS.get(parts[0])
+            if parser is None:
                 continue
+            try:
+                results.append(parser(parts))
+            except IndexError:
+                self._logger.warning("Could not parse QENG line - too few fields: %s", line.strip())
 
         if not results:
-            pass
             self._logger.warning("No QENG measurements found!")
         return results
 
@@ -318,19 +319,55 @@ class Quectel(Modem):
         )
 
     @staticmethod
-    def _parse_nr5g(parts: list[str | None], rat: str) -> CellSample:
-        """Builds a CellSample from a parsed NR5G-SA/NSA +QENG data line."""
+    def _parse_nr5g_nsa(parts: list[str | None]) -> CellSample:
+        """Builds a CellSample from an NR5G-NSA +QENG line:
+        `"NR5G-NSA",<MCC>,<MNC>,<PCID>,<RSRP>,<SINR>,<RSRQ>,<ARFCN>,<band>,<NR_DL_bandwidth>,<scs>`.
+
+        It carries neither TAC nor cell ID - those belong to the LTE anchor cell. Fields missing
+        from a short line are None.
+        """
+        field = _FieldReader(parts)
         return CellSample(
-            rat=rat,
-            mcc=Quectel._to_int(parts[1]),
-            mnc=Quectel._to_int(parts[2]),
-            tac=Quectel._to_int(parts[3]),
-            rsrp=Quectel._to_float(parts[4]),
-            sinr=Quectel._to_float(parts[5]),
-            rsrq=Quectel._to_float(parts[6]),
-            channel=Quectel._to_int(parts[7]),
-            band=Quectel._to_int(parts[8]),
-            vendor_specific_extras={"scs_index": Quectel._to_int(parts[9])},
+            rat="NR5G-NSA",
+            mcc=field.as_int(1),
+            mnc=field.as_int(2),
+            pci=field.as_int(3),
+            rsrp=field.as_float(4),
+            sinr=field.as_float(5),
+            rsrq=field.as_float(6),
+            channel=field.as_int(7),
+            band=field.as_int(8),
+            vendor_specific_extras={"dl_bandwidth_index": field.as_int(9), "scs_index": field.as_int(10)},
+        )
+
+    @staticmethod
+    def _parse_nr5g_sa(parts: list[str | None]) -> CellSample:
+        """Builds a CellSample from an NR5G-SA +QENG line, its leading report type and state
+        already dropped: `"NR5G-SA",<duplex_mode>,<MCC>,<MNC>,<cellID>,<PCID>,<TAC>,<ARFCN>,
+        <band>,<NR_DL_bandwidth>,<RSRP>,<RSRQ>,<SINR>,<...>,<srxlev>`.
+
+        RSRQ comes before SINR here, unlike NSA. The field before srxlev is left out: sources
+        disagree on whether it is the subcarrier spacing or the TX power. Fields missing from a
+        short line are None.
+        """
+        field = _FieldReader(parts)
+        return CellSample(
+            rat="NR5G-SA",
+            mcc=field.as_int(2),
+            mnc=field.as_int(3),
+            cell_id=field.as_hex_int(4),
+            pci=field.as_int(5),
+            tac=field.as_hex_int(6),
+            channel=field.as_int(7),
+            band=field.as_int(8),
+            rsrp=field.as_float(10),
+            rsrq=field.as_float(11),
+            sinr=field.as_float(12),
+            vendor_specific_extras={
+                "duplex_mode": field.as_text(1),
+                "dl_bandwidth_index": field.as_int(9),
+                "srxlev": field.as_int(14),
+            },
         )
 
     @staticmethod
@@ -367,3 +404,30 @@ class Quectel(Modem):
             return None
         val = val.strip().strip('"')
         return None if val in ("", "-") else val
+
+
+class _FieldReader:
+    """Reads the fields of one parsed AT response line by position; a position past the end of
+    a short line reads as None."""
+
+    def __init__(self, parts: list[str | None]):
+        self._parts = parts
+
+    def as_text(self, index: int) -> str | None:
+        return self._parts[index] if index < len(self._parts) else None
+
+    def as_int(self, index: int) -> int | None:
+        return Quectel._to_int(self.as_text(index))
+
+    def as_hex_int(self, index: int) -> int | None:
+        return Quectel._to_hex_int(self.as_text(index))
+
+    def as_float(self, index: int) -> float | None:
+        return Quectel._to_float(self.as_text(index))
+
+
+_QENG_PARSERS = {
+    "LTE": Quectel._parse_lte,
+    "NR5G-NSA": Quectel._parse_nr5g_nsa,
+    "NR5G-SA": Quectel._parse_nr5g_sa,
+}

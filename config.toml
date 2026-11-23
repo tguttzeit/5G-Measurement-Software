@@ -6,7 +6,7 @@ type = "quectel"
 # port = "/dev/ttyUSB2"
 baud_rate = 115200
 timeout = 1.0
-# "servingcell" (Standard, AT+QENG) or "sa_scan" (AT+QSCAN, NR5G-SA-only).
+# "serving_cell" (standard, AT+QENG) or "sa_scan" (AT+QSCAN, NR5G-SA-only).
 # For "sa_scan", band/modus have to be set manually via AT console before running:
 #   AT+QNWPREFCFG="mode_pref",NR5GSA
 #   AT+QNWPREFCFG="nr5g_disable",0
@@ -25,18 +25,9 @@ timeout = 1.0
 [device]
 mission_type = "ground"
 
-# Settings profile applied for the device's mission_type, on top of the values in this file and
-# below config.local.toml and remote overrides. Keys are remote-override field names (see
-# docs/configuration.md); an invalid key or value stops startup.
-[profiles.ground]
-
-[profiles.drone]
-movement_gate_enabled = false
-idle_threshold_s = 0
-
 [collector]
 position_threshold = 15
-max_idle_time = 200
+max_idle_time = 1800
 max_wait_for_first_fix = 300
 wait_log_interval = 5
 keep_alive_host = "8.8.8.8"
@@ -65,10 +56,10 @@ confirmations_required = 2
 # home_longitude = 0.0
 home_departure_threshold = 100.0
 
-# quectel-CM connection-manager daemon, started by this app itself (via sudo) once movement is
-# confirmed - not auto-started by systemd at boot.
+# quectel-CM connection-manager daemon, started by this app itself (via sudo) right at boot, in
+# both modes - not auto-started by systemd.
 # binary is this device's local install path - set it in config.local.toml, not here (see
-# docs/device-bringup-faq.md). The placeholder below is intentionally never a real path.
+# https://bosdra.net.tha.de/docs/en/). The placeholder below is intentionally never a real path.
 [quectel_cm]
 binary = "/add/your/quectel-CM/path/here"
 args = ["-s", "web.vodafone.de"]
@@ -77,7 +68,7 @@ args = ["-s", "web.vodafone.de"]
 # measurement uploads alike). url must be https, since the backend's answers are a path for
 # instructions to reach the device.
 # url and device_key are per-device identity/secrets - set them in config.local.toml, not here
-# (see docs/device-bringup-faq.md). The placeholders below are intentionally never real values.
+# (see https://bosdra.net.tha.de/docs/en/). The placeholders below are intentionally never real values.
 [backend]
 url = "https://add.your.backend.here"
 # Per-device API key for authenticating requests with the backend.
@@ -88,7 +79,7 @@ device_key = ""
 # responses came from the real backend. Leave it unset to keep remote commands disabled (any
 # response claiming to carry them is discarded and logged).
 # device_id and hmac_secret are per-device identity/secrets - set them in config.local.toml, not
-# here (see docs/device-bringup-faq.md).
+# here (see https://bosdra.net.tha.de/docs/en/).
 [heartbeat]
 enabled = true
 path = "/api/heartbeat"
@@ -97,25 +88,26 @@ timeout_s = 10.0
 # Delivered heartbeats are logged at INFO: the first, the first after failures, and otherwise one
 # summary line per this many seconds.
 success_log_interval_s = 600.0
-# Device identifier for the backend to distinguish devices. Defaults to the Pi's hostname.
+# Device identifier for the backend to distinguish devices. Unset here on purpose: it has to be
+# the id the backend provisioned, and [device] device_id must be set to the same value.
 device_id = ""
 hmac_secret = ""
 
 # Where `python -m measurement_software.selftest` reports check results (pass/fail/skip per
-# hardware-facing subsystem), for the manual field checks. Reuses
-# heartbeat.device_id/heartbeat.device_key above for authentication - no separate credential.
+# hardware-facing subsystem), for the manual field checks. Reuses heartbeat.device_id and
+# backend.device_key above for authentication - no separate credential.
 # Empty by default: an unconfigured device runs selftest checks locally (console output) only.
 # results_url is per-device identity (embeds the real backend host) - set it in
-# config.local.toml, not here (see docs/device-bringup-faq.md).
+# config.local.toml, not here (see https://bosdra.net.tha.de/docs/en/).
 [selftest]
 results_url = ""
 
 # Live GPS-fix-finding diagnostic (run-gps-fix-test-now / stop-gps-fix-test-now), for finding a
-# good antenna mounting position - only dispatched while in Waiting Mode. Posts num_satellites/has_fix/elapsed_s to
+# good antenna mounting position - only dispatched while in Manual Mode. Posts num_satellites/has_fix/elapsed_s to
 # status_url roughly every report_interval_s while the run is going; auto-stops after timeout_s
 # if stop-gps-fix-test-now never arrives. Reuses heartbeat.device_id/backend.device_key for
 # authentication - no separate credential. status_url is per-device identity (embeds the real
-# backend host) - set it in config.local.toml, not here (see docs/device-bringup-faq.md).
+# backend host) - set it in config.local.toml, not here (see https://bosdra.net.tha.de/docs/en/).
 [gps_fix_test]
 status_url = ""
 report_interval_s = 2.0
@@ -136,7 +128,7 @@ empty_captures_until_pipeline_broken = 3
 low_free_space_warning_bytes = 500_000_000
 
 # Small SSD1306 OLED status display over I2C, for field diagnostics with no terminal attached.
-# Disabled by default so the app runs unchanged without a screen attached.
+# Set enabled = false on a device with no screen attached: a no-op display is then used instead.
 [display]
 enabled = true
 type = "ssd1306"
@@ -145,11 +137,11 @@ i2c_address = 0x3C
 refresh_interval_s = 2.0
 
 # Active latency measurements via flent, run against a test server while the vehicle is moving.
-# Disabled by default: flent needs a counterpart running on the server (netperf for the load
+# Inert until host is set: flent needs a counterpart running on the server (netperf for the load
 # test, a reachable host for the baseline ping), and the load test deliberately saturates the
-# link, so this must only be switched on once that server side is confirmed.
+# link, so only set host once that server side is confirmed.
 # Requires flent and numpy on the device. host is per-device identity (the real test server
-# hostname) - set it in config.local.toml, not here (see docs/device-bringup-faq.md).
+# hostname) - set it in config.local.toml, not here (see https://bosdra.net.tha.de/docs/en/).
 [latency_test]
 enabled = true
 host = ""
@@ -199,25 +191,40 @@ backup_count = 3
 
 [system]
 running_on_pi = true
-shutdown_gpio = 17
 network_interfaces = ["wlan0", "wwan0"]
-# "auto" (default) waits for confirmed movement before opening the modem/quectel-CM. "waiting"
-# opens the cellular link and starts heartbeating immediately at boot instead, then does nothing
-# further until an explicit remote command (start-measuring-now) says what to do.
+# Both modes open the cellular link and start heartbeating right at boot. "auto" (default) then
+# transitions into measuring on its own once the movement gate confirms movement; "manual" does
+# nothing further until an explicit remote command (start-measuring-now) says what to do.
 mode = "auto"
 # An unhandled error reboots. The same error this many times in a row - or this many reboots for
-# any errors in a row - switches to Waiting Mode and reboots; an error even then reboots into
-# maintenance mode, which keeps only the cellular link up for debugging over SSH (leave it by
-# deleting crash_state.json next to this file and rebooting).
+# any errors in a row - reboots into a one-shot recovery state that doesn't measure until told
+# to; an error even then reboots into maintenance mode, which keeps only the cellular link up
+# (supervised by the link watchdog, radio resets included) for debugging over SSH. A reboot alone
+# doesn't leave it: fix the cause, delete crash_state.json next to this file and reboot.
+# An error before the run starts (e.g. a broken config file) and an error the crash state can't
+# record enter maintenance mode right away, without a reboot and without making it stick: once the
+# cause is fixed, the next reboot starts normally. If the config can't be loaded at all, only the
+# cellular link comes up, from [quectel_cm] and [link_watchdog] (binary falling back to
+# vendor/quectel-CM/quectel-CM).
 crash_same_error_limit = 3
 crash_reboot_limit = 5
 
 # Restarts quectel-CM when the cellular link (no IPv4 on `interface`) stays down for
 # restart_after_s, and after radio_reset_after_restarts restarts that didn't help, resets the
-# modem's radio (AT+CFUN) - the latter only while measuring. Only active with running_on_pi.
+# modem's radio (AT+CFUN). While the link stays down, the wait before each further step doubles,
+# up to max_restart_interval_s (never giving up); the next outage starts again from
+# restart_after_s. Only active with running_on_pi.
 [link_watchdog]
 enabled = true
 interface = "wwan0"
 check_interval_s = 30.0
 restart_after_s = 180.0
+max_restart_interval_s = 1800.0
 radio_reset_after_restarts = 2
+
+# Sets the system clock over NTP (SNTP) once the cellular link is up, because the Pi has no RTC
+# and systemd-timesyncd only tries before the link exists. An IPv4 address or hostname; empty
+# disables it. Device-specific: set it in config.local.toml.
+[clock]
+ntp_server = ""
+ntp_timeout_s = 3.0

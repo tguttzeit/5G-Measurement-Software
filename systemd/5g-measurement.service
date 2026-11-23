@@ -1,7 +1,7 @@
 [Unit]
 Description=5G Measurement Software
 # Deliberately does NOT require/start quectel-CM here - the app itself starts quectel-CM right at
-# boot (both Auto Mode and Waiting Mode).
+# boot (both Auto Mode and Manual Mode).
 After=network.target
 
 [Service]
@@ -9,6 +9,9 @@ Type=simple
 WorkingDirectory=@INSTALL_DIR@
 ExecStart=@INSTALL_DIR@/.venv/bin/python -m measurement_software.main
 Restart=no
+# SIGTERM goes to the app alone: it still sends its last heartbeat and uploads over the cellular
+# link, then stops quectel-CM itself. Anything left after the app exits gets SIGKILL.
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target

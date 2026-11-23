@@ -25,10 +25,6 @@ timeout = 1.0
 
 [uploader]
 upload_dir = "{upload_dir}"
-upload_user = "pi"
-upload_host = "example.org"
-upload_port = 2000
-remote_dir = "/remote/dir/"
 """
 
 
@@ -272,59 +268,23 @@ class TestCheckUploader:
     def test_fails_when_no_network(self, tmp_path, monkeypatch):
         monkeypatch.setattr(checks.Uploader, "_is_interface_up", staticmethod(lambda iface: False))
 
-        result = checks.check_uploader(make_config(tmp_path), confirm_side_effects=False)
+        result = checks.check_uploader(make_config(tmp_path))
 
         assert result.status == CheckStatus.FAILED
 
-    def test_passes_without_uploading_when_not_confirmed(self, tmp_path, monkeypatch):
+    def test_passes_when_an_interface_is_up_without_running_any_external_command(self, tmp_path, monkeypatch):
         monkeypatch.setattr(checks.Uploader, "_is_interface_up", staticmethod(lambda iface: iface == "wlan0"))
-        calls = []
-        monkeypatch.setattr(checks.subprocess, "run", lambda *a, **k: calls.append(a))
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("no external command may run"))
 
-        result = checks.check_uploader(make_config(tmp_path), confirm_side_effects=False)
+        result = checks.check_uploader(make_config(tmp_path))
 
         assert result.status == CheckStatus.PASSED
-        assert result.details == {"network_reachable": True, "real_upload_attempted": False}
-        assert calls == []
-
-    def test_uploads_a_throwaway_probe_when_confirmed(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(checks.Uploader, "_is_interface_up", staticmethod(lambda iface: iface == "wlan0"))
-        recorded = {}
-
-        def fake_run(cmd, **kwargs):
-            recorded["cmd"] = cmd
-            probe_path = Path(cmd[-2])
-            recorded["probe_existed_during_call"] = probe_path.exists()
-            return subprocess.CompletedProcess(args=cmd, returncode=0)
-
-        monkeypatch.setattr(checks.subprocess, "run", fake_run)
-
-        result = checks.check_uploader(make_config(tmp_path), confirm_side_effects=True)
-
-        assert result.status == CheckStatus.PASSED
-        assert result.details["real_upload_attempted"] is True
-        assert recorded["probe_existed_during_call"] is True
-        assert "selftest_probe_" in recorded["cmd"][-2]
-        assert recorded["cmd"][-1].endswith("/remote/dir/" + Path(recorded["cmd"][-2]).name)
-        # The temp file must never be left behind, and must never live inside upload_dir.
-        assert not Path(recorded["cmd"][-2]).exists()
-        assert list((tmp_path / "uploads").glob("*")) == [] if (tmp_path / "uploads").exists() else True
-
-    def test_reports_failure_when_scp_fails(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(checks.Uploader, "_is_interface_up", staticmethod(lambda iface: iface == "wlan0"))
-        monkeypatch.setattr(
-            checks.subprocess, "run",
-            lambda cmd, **kwargs: subprocess.CompletedProcess(args=cmd, returncode=1),
-        )
-
-        result = checks.check_uploader(make_config(tmp_path), confirm_side_effects=True)
-
-        assert result.status == CheckStatus.FAILED
+        assert result.details == {"network_reachable": True}
 
 
 class TestCheckHeartbeat:
     def test_skipped_when_disabled(self, tmp_path):
-        result = checks.check_heartbeat(make_config(tmp_path))
+        result = checks.check_heartbeat(make_config(tmp_path, extra="[heartbeat]\nenabled = false\n"))
 
         assert result.status == CheckStatus.SKIPPED
 
@@ -386,7 +346,7 @@ class TestCheckKeepModemAlive:
 
 class TestCheckDisplay:
     def test_skipped_when_disabled(self, tmp_path):
-        result = checks.check_display(make_config(tmp_path))
+        result = checks.check_display(make_config(tmp_path, extra="[display]\nenabled = false\n"))
 
         assert result.status == CheckStatus.SKIPPED
 
@@ -421,7 +381,7 @@ enabled = true
 
 class TestCheckLatencyTester:
     def test_skipped_when_disabled(self, tmp_path):
-        result = checks.check_latency_tester(make_config(tmp_path))
+        result = checks.check_latency_tester(make_config(tmp_path, extra="[latency_test]\nenabled = false\n"))
 
         assert result.status == CheckStatus.SKIPPED
 
@@ -477,14 +437,15 @@ class TestDispatch:
         }
 
     def test_run_check_dispatches_by_name(self, tmp_path):
-        result = checks.run_check("display", make_config(tmp_path), confirm_side_effects=False)
+        config = make_config(tmp_path, extra="[display]\nenabled = false\n")
+        result = checks.run_check("display", config)
 
         assert result.name == "display"
         assert result.status == CheckStatus.SKIPPED
 
     def test_run_check_raises_on_unknown_name(self, tmp_path):
         with pytest.raises(ValueError):
-            checks.run_check("nonexistent", make_config(tmp_path), confirm_side_effects=False)
+            checks.run_check("nonexistent", make_config(tmp_path))
 
     def test_backend_test_types_match_the_five_backend_supported_checks(self):
         assert checks.BACKEND_TEST_TYPES == {"modem", "gps", "collector", "uploader", "heartbeat"}
